@@ -1,4 +1,4 @@
-# agentserve
+# a2a-kit
 
 A2A-compliant agent framework. One `Worker` class, one `handle()` method, all endpoints auto-registered.
 
@@ -101,4 +101,4 @@ You implement `Worker.handle(ctx) -> TaskResult`. That's the only thing you writ
 ## Custom Backends
 
 Implement `Storage` or `Broker` ABCs and pass them to `A2AServer` instead of the default `"memory"` backends.
-# a2a-kit
+

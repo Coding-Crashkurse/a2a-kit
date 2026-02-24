@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentserve"
+version = "0.1.0"
+description = "A2A-compliant agent framework – from zero to running agent in 10 lines."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "a2a-sdk>=0.2.0",
+    "fastapi>=0.115.0",
+    "sse-starlette>=2.0.0",
+    "anyio>=4.0.0",
+    "pydantic>=2.0.0",
+    "uvicorn[standard]>=0.30.0",
+]
+
+[project.optional-dependencies]
+postgres = ["sqlalchemy[asyncio]>=2.0.0", "asyncpg>=0.30.0"]
+langgraph = ["langgraph>=0.2.0"]
+dev = ["pytest", "pytest-asyncio", "httpx"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentserve"]
