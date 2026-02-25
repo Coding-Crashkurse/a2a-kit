@@ -13,17 +13,14 @@ from agentserve.agent_card import AgentCardConfig
 from agentserve.broker import Broker, InMemoryBroker
 from agentserve.endpoints import build_a2a_router, build_discovery_router
 from agentserve.storage import (
-    DuplicateMessageIdError,
     InMemoryStorage,
-    MessageIdConflictError,
-    MissingMessageIdError,
     Storage,
     TaskNotAcceptingMessagesError,
     TaskNotFoundError,
     TaskTerminalStateError,
 )
 from agentserve.task_manager import TaskManager
-from agentserve.worker import Worker, _WorkerAdapter
+from agentserve.worker import Worker, WorkerAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +71,7 @@ class A2AServer:
             """Initialize and tear down storage, broker, and worker adapter."""
             storage = server._build_storage()
             broker = server._build_broker()
-            adapter = _WorkerAdapter(server._worker, broker, storage)
+            adapter = WorkerAdapter(server._worker, broker, storage)
             tm = TaskManager(
                 broker=broker,
                 storage=storage,
@@ -116,20 +113,9 @@ def _register_exception_handlers(app: FastAPI) -> None:
     async def _(_req: Request, _exc: TaskTerminalStateError):
         return JSONResponse(status_code=409, content={"code": -32004, "message": "Task is terminal; cannot continue"})
 
-    @app.exception_handler(MessageIdConflictError)
-    async def _(_req: Request, _exc: MessageIdConflictError):
-        return JSONResponse(status_code=409, content={"code": -32602, "message": "messageId bound to different task"})
-
-    @app.exception_handler(DuplicateMessageIdError)
-    async def _(_req: Request, _exc: DuplicateMessageIdError):
-        return JSONResponse(status_code=409, content={"code": -32602, "message": "Duplicate messageId"})
-
     @app.exception_handler(TaskNotAcceptingMessagesError)
     async def _(_req: Request, exc: TaskNotAcceptingMessagesError):
         state = getattr(exc, "state", None)
         msg = f"Task is in state {state} and does not accept messages." if state else "Task does not accept messages."
         return JSONResponse(status_code=422, content={"code": -32602, "message": msg})
 
-    @app.exception_handler(MissingMessageIdError)
-    async def _(_req: Request, _exc: MissingMessageIdError):
-        return JSONResponse(status_code=400, content={"code": -32600, "message": "messageId is required"})

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import AsyncIterator
 
 from a2a.types import AgentCard, MessageSendParams, Task
@@ -13,8 +12,6 @@ from sse_starlette import EventSourceResponse
 from agentserve.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
-
-UUID_RE = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 
 
 def _get_tm(request: Request) -> TaskManager:
@@ -26,18 +23,10 @@ def _get_tm(request: Request) -> TaskManager:
 
 
 def _validate_ids(params: MessageSendParams) -> MessageSendParams:
-    """Validate that messageId is present and all IDs are valid UUIDs."""
+    """Validate that messageId is present."""
     msg = params.message
     if not msg.message_id or not msg.message_id.strip():
         raise HTTPException(status_code=400, detail={"code": -32600, "message": "messageId is required."})
-    ids = [("message_id", msg.message_id)]
-    if msg.task_id:
-        ids.append(("task_id", msg.task_id))
-    if msg.context_id:
-        ids.append(("context_id", msg.context_id))
-    for name, value in ids:
-        if not re.match(UUID_RE, value):
-            raise HTTPException(status_code=400, detail=f"Invalid UUID for '{name}': {value}")
     return params
 
 
@@ -75,7 +64,7 @@ def build_a2a_router() -> APIRouter:
     @router.get("/v1/tasks/{task_id}")
     async def tasks_get(
         request: Request,
-        task_id: str = Path(pattern=UUID_RE),
+        task_id: str = Path(),
         history_length: int | None = None,
     ) -> Task:
         """Get a single task by ID."""
@@ -94,7 +83,7 @@ def build_a2a_router() -> APIRouter:
     @router.post("/v1/tasks/{task_id}:cancel")
     async def tasks_cancel(
         request: Request,
-        task_id: str = Path(pattern=UUID_RE),
+        task_id: str = Path(),
     ) -> Task:
         """Cancel a task by ID."""
         tm = _get_tm(request)

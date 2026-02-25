@@ -5,9 +5,7 @@ from agentserve.broker import Broker, InMemoryBroker
 from agentserve.event_emitter import DefaultEventEmitter, EventEmitter
 from agentserve.server import A2AServer
 from agentserve.storage import (
-    DuplicateMessageIdError,
     InMemoryStorage,
-    MissingMessageIdError,
     Storage,
     TaskNotAcceptingMessagesError,
     TaskNotFoundError,
@@ -31,7 +29,5 @@ __all__ = [
     "TaskManager",
     "TaskNotFoundError",
     "TaskTerminalStateError",
-    "DuplicateMessageIdError",
-    "MissingMessageIdError",
     "TaskNotAcceptingMessagesError",
 ]
