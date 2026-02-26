@@ -13,6 +13,16 @@ from a2a.types import (
 from pydantic import BaseModel, Field
 
 
+class SkillConfig(BaseModel):
+    """User-friendly skill definition without A2A protocol imports."""
+
+    id: str
+    name: str
+    description: str
+    tags: list[str] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+
+
 class AgentCardConfig(BaseModel):
     """User-friendly configuration for building an AgentCard."""
 
@@ -20,15 +30,30 @@ class AgentCardConfig(BaseModel):
     description: str
     version: str = "1.0.0"
     protocol_version: str = "0.3.0"
-    skills: list[AgentSkill] = Field(default_factory=list)
+    skills: list[SkillConfig] = Field(default_factory=list)
     extensions: list[AgentExtension] = Field(default_factory=list)
 
     streaming: bool = True
     push_notifications: bool = False
     supports_extended_card: bool = False
 
-    input_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
-    output_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
+    input_modes: list[str] = Field(
+        default_factory=lambda: ["application/json", "text/plain"]
+    )
+    output_modes: list[str] = Field(
+        default_factory=lambda: ["application/json", "text/plain"]
+    )
+
+
+def _to_agent_skill(skill: SkillConfig) -> AgentSkill:
+    """Convert a SkillConfig to the A2A AgentSkill type."""
+    return AgentSkill(
+        id=skill.id,
+        name=skill.name,
+        description=skill.description,
+        tags=skill.tags or None,
+        examples=skill.examples or None,
+    )
 
 
 def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
@@ -51,7 +76,7 @@ def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
         ),
         default_input_modes=config.input_modes,
         default_output_modes=config.output_modes,
-        skills=config.skills,
+        skills=[_to_agent_skill(s) for s in config.skills],
         supports_authenticated_extended_card=config.supports_extended_card,
     )
 
@@ -59,5 +84,9 @@ def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
 def external_base_url(headers: dict, scheme: str, netloc: str) -> str:
     """Derive the external base URL from request headers (proxy-aware)."""
     resolved_scheme = (headers.get("x-forwarded-proto") or scheme).split(",")[0].strip()
-    resolved_host = (headers.get("x-forwarded-host") or headers.get("host") or netloc).split(",")[0].strip()
+    resolved_host = (
+        (headers.get("x-forwarded-host") or headers.get("host") or netloc)
+        .split(",")[0]
+        .strip()
+    )
     return f"{resolved_scheme}://{resolved_host}"

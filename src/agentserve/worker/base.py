@@ -1,16 +1,22 @@
-"""Worker ABC, TaskContext, TaskResult, and TaskContextImpl."""
+"""Worker ABC, TaskContext, FileInfo, history wrappers, and TaskContextImpl."""
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-import anyio
 from a2a.types import (
     Artifact,
+    DataPart,
+    FilePart,
+    FileWithBytes,
+    FileWithUri,
     Message,
     Part,
     Role,
@@ -20,20 +26,133 @@ from a2a.types import (
     TaskStatusUpdateEvent,
     TextPart,
 )
-from pydantic import BaseModel, Field
 
+from agentserve.broker.base import CancelScope
 from agentserve.event_emitter import EventEmitter
 
 logger = logging.getLogger(__name__)
 
 
-class TaskResult(BaseModel):
-    """Return value from Worker.handle()."""
+@dataclass(frozen=True)
+class FileInfo:
+    """Read-only wrapper for file parts from the user message."""
 
-    text: str | None = None
-    parts: list[Part] | None = None
-    metadata: dict = Field(default_factory=dict)
-    artifacts_emitted: bool = False
+    content: bytes | None
+    url: str | None
+    filename: str | None
+    media_type: str | None
+
+
+@dataclass(frozen=True)
+class HistoryMessage:
+    """Read-only wrapper for a previous message within a task."""
+
+    role: str
+    text: str
+    parts: list[Any]
+    message_id: str
+
+
+@dataclass(frozen=True)
+class PreviousArtifact:
+    """Read-only wrapper for an artifact from a previous turn."""
+
+    artifact_id: str
+    name: str | None
+    parts: list[Any]
+
+
+def _build_parts(
+    *,
+    text: str | None = None,
+    data: dict | list | None = None,
+    file_bytes: bytes | None = None,
+    file_url: str | None = None,
+    media_type: str | None = None,
+    filename: str | None = None,
+) -> list[Part]:
+    """Build a list[Part] from simple Python types.
+
+    Raises:
+        ValueError: If no content parameter is provided.
+    """
+    parts: list[Part] = []
+
+    if text is not None:
+        parts.append(Part(TextPart(text=text)))
+
+    if data is not None:
+        parts.append(Part(DataPart(data=data)))
+
+    if file_bytes is not None:
+        encoded = base64.b64encode(file_bytes).decode("ascii")
+        parts.append(
+            Part(
+                FilePart(
+                    file=FileWithBytes(
+                        bytes=encoded,
+                        mime_type=media_type,
+                        name=filename,
+                    )
+                )
+            )
+        )
+
+    if file_url is not None:
+        parts.append(
+            Part(
+                FilePart(
+                    file=FileWithUri(
+                        uri=file_url,
+                        mime_type=media_type,
+                        name=filename,
+                    )
+                )
+            )
+        )
+
+    if not parts:
+        raise ValueError(
+            "At least one content parameter (text, data, file_bytes, file_url) "
+            "must be provided."
+        )
+
+    return parts
+
+
+def _extract_files(parts: list[Any]) -> list[FileInfo]:
+    """Extract FileInfo wrappers from raw message parts."""
+    files: list[FileInfo] = []
+    for part in parts:
+        root = getattr(part, "root", part)
+        if not isinstance(root, FilePart):
+            continue
+        f = root.file
+        content: bytes | None = None
+        url: str | None = None
+        if isinstance(f, FileWithBytes) and f.bytes:
+            content = base64.b64decode(f.bytes)
+        if isinstance(f, FileWithUri):
+            url = f.uri
+        files.append(
+            FileInfo(
+                content=content,
+                url=url,
+                filename=getattr(f, "name", None),
+                media_type=getattr(f, "mime_type", None),
+            )
+        )
+    return files
+
+
+def _extract_data_parts(parts: list[Any]) -> list[dict]:
+    """Extract structured data dicts from raw message parts."""
+    result: list[dict] = []
+    for part in parts:
+        root = getattr(part, "root", part)
+        if isinstance(root, DataPart) and isinstance(root.data, dict):
+            result.append(root.data)
+    return result
 
 
 class TaskContext(ABC):
@@ -60,29 +179,80 @@ class TaskContext(ABC):
     def is_cancelled(self) -> bool:
         """Check whether cancellation has been requested for this task."""
 
+    @property
     @abstractmethod
-    async def send_status(self, message: str) -> None:
-        """Emit an intermediate status update (state stays 'working')."""
+    def turn_ended(self) -> bool:
+        """Whether the handler signaled the end of this processing turn.
+
+        True after calling a terminal method (complete/fail/reject/respond)
+        or requesting further input (request_input/request_auth).
+        """
+
+    @property
+    @abstractmethod
+    def files(self) -> list[FileInfo]:
+        """All file parts from the user message as typed wrappers."""
+
+    @property
+    @abstractmethod
+    def data_parts(self) -> list[dict]:
+        """All structured data parts from the user message."""
+
+    @property
+    @abstractmethod
+    def history(self) -> list[HistoryMessage]:
+        """Previous messages within this task (excluding the current message)."""
+
+    @property
+    @abstractmethod
+    def previous_artifacts(self) -> list[PreviousArtifact]:
+        """Artifacts already produced by this task in previous turns."""
 
     @abstractmethod
-    async def complete(self, message: str | None = None) -> None:
-        """Mark the task as completed."""
+    async def complete(self, text: str | None = None) -> None:
+        """Mark the task as completed, optionally with a final text artifact."""
+
+    @abstractmethod
+    async def complete_json(self, data: dict | list) -> None:
+        """Complete task with a JSON data artifact."""
 
     @abstractmethod
     async def fail(self, reason: str) -> None:
-        """Mark the task as failed."""
+        """Mark the task as failed with an error reason."""
+
+    @abstractmethod
+    async def reject(self, reason: str | None = None) -> None:
+        """Reject the task — agent decides not to perform it."""
 
     @abstractmethod
     async def request_input(self, question: str) -> None:
         """Transition to input-required state."""
 
     @abstractmethod
+    async def request_auth(self, details: str | None = None) -> None:
+        """Transition to auth-required state for secondary credentials."""
+
+    @abstractmethod
+    async def respond(self, text: str | None = None) -> None:
+        """Complete the task with a direct message response (no artifact created)."""
+
+    @abstractmethod
+    async def send_status(self, message: str | None = None) -> None:
+        """Emit an intermediate status update (state stays working)."""
+
+    @abstractmethod
     async def emit_artifact(
         self,
         *,
         artifact_id: str,
-        parts: list[Part],
+        text: str | None = None,
+        data: dict | list | None = None,
+        file_bytes: bytes | None = None,
+        file_url: str | None = None,
+        media_type: str | None = None,
+        filename: str | None = None,
         name: str | None = None,
+        description: str | None = None,
         append: bool = False,
         last_chunk: bool = False,
         metadata: dict | None = None,
@@ -100,6 +270,18 @@ class TaskContext(ABC):
     ) -> None:
         """Emit a single-text artifact chunk."""
 
+    @abstractmethod
+    async def emit_data_artifact(
+        self,
+        data: dict | list,
+        *,
+        artifact_id: str = "answer",
+        media_type: str = "application/json",
+        append: bool = False,
+        last_chunk: bool = False,
+    ) -> None:
+        """Emit a structured data artifact chunk."""
+
 
 class TaskContextImpl(TaskContext):
     """Concrete implementation backed by an EventEmitter."""
@@ -114,7 +296,9 @@ class TaskContextImpl(TaskContext):
         parts: list[Any] | None = None,
         metadata: dict | None = None,
         emitter: EventEmitter,
-        cancel_event: anyio.Event,
+        cancel_event: CancelScope,
+        history: list[HistoryMessage] | None = None,
+        previous_artifacts: list[PreviousArtifact] | None = None,
     ) -> None:
         self.task_id = task_id
         self.context_id = context_id
@@ -124,47 +308,205 @@ class TaskContextImpl(TaskContext):
         self.metadata = metadata if metadata is not None else {}
         self._emitter = emitter
         self._cancel_event = cancel_event
+        self._history = history if history is not None else []
+        self._previous_artifacts = (
+            previous_artifacts if previous_artifacts is not None else []
+        )
+        self._turn_ended: bool = False
+        self._responded_with_message: bool = False
 
     @property
     def is_cancelled(self) -> bool:
+        """Check whether cancellation has been requested for this task."""
         return self._cancel_event.is_set()
 
-    async def send_status(self, message: str) -> None:
-        await self._emit_status(TaskState.working, message_text=message, final=False)
+    @property
+    def turn_ended(self) -> bool:
+        """Whether the handler signaled the end of this processing turn."""
+        return self._turn_ended
 
-    async def complete(self, message: str | None = None) -> None:
-        await self._emitter.update_task(self.task_id, state=TaskState.completed.value)
-        await self._emit_status(TaskState.completed, message_text=message)
+    @property
+    def history(self) -> list[HistoryMessage]:
+        """Previous messages within this task (excluding the current message)."""
+        return self._history
+
+    @property
+    def previous_artifacts(self) -> list[PreviousArtifact]:
+        """Artifacts already produced by this task in previous turns."""
+        return self._previous_artifacts
+
+    @property
+    def files(self) -> list[FileInfo]:
+        """All file parts from the user message as typed wrappers."""
+        return _extract_files(self.parts)
+
+    @property
+    def data_parts(self) -> list[dict]:
+        """All structured data parts from the user message."""
+        return _extract_data_parts(self.parts)
+
+    async def complete(self, text: str | None = None) -> None:
+        """Mark the task as completed, optionally with a final text artifact."""
+        artifacts = None
+        messages = None
+
+        if text:
+            final_parts = [Part(TextPart(text=text))]
+            artifacts = [Artifact(artifact_id="final-answer", parts=final_parts)]
+            messages = [
+                Message(
+                    role=Role.agent,
+                    parts=final_parts,
+                    message_id=str(uuid.uuid4()),
+                    metadata=self.metadata,
+                )
+            ]
+
+        await self._emitter.update_task(
+            self.task_id,
+            state=TaskState.completed,
+            artifacts=artifacts,
+            messages=messages,
+        )
+
+        if artifacts:
+            await self._emitter.send_event(
+                self.task_id,
+                TaskArtifactUpdateEvent(
+                    kind="artifact-update",
+                    task_id=self.task_id,
+                    context_id=self.context_id,
+                    artifact=artifacts[0],
+                    append=False,
+                    last_chunk=True,
+                ),
+            )
+
+        await self._emit_status(TaskState.completed)
+        self._turn_ended = True
+
+    async def complete_json(self, data: dict | list) -> None:
+        """Complete task with a JSON data artifact."""
+        json_text = json.dumps(data, ensure_ascii=False)
+        data_parts = [Part(DataPart(data=data))]
+        artifact = Artifact(
+            artifact_id="final-answer",
+            parts=data_parts,
+            metadata={"media_type": "application/json"},
+        )
+        agent_message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text=json_text))],
+            message_id=str(uuid.uuid4()),
+            metadata=self.metadata,
+        )
+
+        await self._emitter.update_task(
+            self.task_id,
+            state=TaskState.completed,
+            artifacts=[artifact],
+            messages=[agent_message],
+        )
+
+        await self._emitter.send_event(
+            self.task_id,
+            TaskArtifactUpdateEvent(
+                kind="artifact-update",
+                task_id=self.task_id,
+                context_id=self.context_id,
+                artifact=artifact,
+                append=False,
+                last_chunk=True,
+            ),
+        )
+
+        await self._emit_status(TaskState.completed)
+        self._turn_ended = True
 
     async def fail(self, reason: str) -> None:
-        await self._emitter.update_task(self.task_id, state=TaskState.failed.value)
+        """Mark the task as failed with an error reason."""
+        await self._emitter.update_task(self.task_id, state=TaskState.failed)
         await self._emit_status(TaskState.failed, message_text=reason)
+        self._turn_ended = True
+
+    async def reject(self, reason: str | None = None) -> None:
+        """Reject the task — agent decides not to perform it."""
+        await self._emitter.update_task(self.task_id, state=TaskState.rejected)
+        await self._emit_status(TaskState.rejected, message_text=reason)
+        self._turn_ended = True
 
     async def request_input(self, question: str) -> None:
-        await self._emitter.update_task(self.task_id, state=TaskState.input_required.value)
+        """Transition to input-required state."""
+        await self._emitter.update_task(self.task_id, state=TaskState.input_required)
         await self._emit_status(TaskState.input_required, message_text=question)
+        self._turn_ended = True
+
+    async def request_auth(self, details: str | None = None) -> None:
+        """Transition to auth-required state for secondary credentials."""
+        await self._emitter.update_task(self.task_id, state=TaskState.auth_required)
+        await self._emit_status(TaskState.auth_required, message_text=details)
+        self._turn_ended = True
+
+    async def respond(self, text: str | None = None) -> None:
+        """Complete the task with a direct message response (no artifact created)."""
+        msg_parts = [Part(TextPart(text=text))] if text else []
+        message = Message(
+            role=Role.agent,
+            parts=msg_parts,
+            message_id=str(uuid.uuid4()),
+            metadata=self.metadata,
+        )
+        await self._emitter.update_task(
+            self.task_id,
+            state=TaskState.completed,
+            messages=[message],
+        )
+        await self._emitter.send_event(self.task_id, message)
+        self._responded_with_message = True
+        self._turn_ended = True
+
+    async def send_status(self, message: str | None = None) -> None:
+        """Emit an intermediate status update (state stays working)."""
+        await self._emit_status(TaskState.working, message_text=message, final=False)
 
     async def emit_artifact(
         self,
         *,
         artifact_id: str,
-        parts: list[Part],
+        text: str | None = None,
+        data: dict | list | None = None,
+        file_bytes: bytes | None = None,
+        file_url: str | None = None,
+        media_type: str | None = None,
+        filename: str | None = None,
         name: str | None = None,
+        description: str | None = None,
         append: bool = False,
         last_chunk: bool = False,
         metadata: dict | None = None,
     ) -> None:
+        """Emit an artifact update event and persist it."""
+        parts = _build_parts(
+            text=text,
+            data=data,
+            file_bytes=file_bytes,
+            file_url=file_url,
+            media_type=media_type,
+            filename=filename,
+        )
         artifact = Artifact(
             artifact_id=artifact_id,
             name=name,
+            description=description,
             parts=parts,
             metadata=metadata or {},
         )
-        if not append:
+        if not append or last_chunk:
             await self._emitter.update_task(
                 self.task_id,
-                state=TaskState.working.value,
+                state=TaskState.working,
                 artifacts=[artifact],
+                append_artifact=append,
             )
         await self._emitter.send_event(
             self.task_id,
@@ -186,9 +528,28 @@ class TaskContextImpl(TaskContext):
         append: bool = False,
         last_chunk: bool = False,
     ) -> None:
+        """Emit a single-text artifact chunk."""
         await self.emit_artifact(
             artifact_id=artifact_id,
-            parts=[Part(TextPart(text=text))],
+            text=text,
+            append=append,
+            last_chunk=last_chunk,
+        )
+
+    async def emit_data_artifact(
+        self,
+        data: dict | list,
+        *,
+        artifact_id: str = "answer",
+        media_type: str = "application/json",
+        append: bool = False,
+        last_chunk: bool = False,
+    ) -> None:
+        """Emit a structured data artifact chunk."""
+        await self.emit_artifact(
+            artifact_id=artifact_id,
+            data=data,
+            metadata={"media_type": media_type},
             append=append,
             last_chunk=last_chunk,
         )
@@ -207,6 +568,8 @@ class TaskContextImpl(TaskContext):
                 TaskState.failed,
                 TaskState.canceled,
                 TaskState.rejected,
+                TaskState.auth_required,
+                TaskState.input_required,
             }
         status = TaskStatus(
             state=state,
@@ -238,5 +601,5 @@ class Worker(ABC):
     """Abstract base class — implement handle() to build an A2A agent."""
 
     @abstractmethod
-    async def handle(self, ctx: TaskContext) -> TaskResult:
-        """Process a task and return the result."""
+    async def handle(self, ctx: TaskContext) -> None:
+        """Process a task using ctx methods to emit results and control lifecycle."""

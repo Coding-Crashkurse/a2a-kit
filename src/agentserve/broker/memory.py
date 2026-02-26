@@ -2,41 +2,82 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, suppress
-from typing import Self
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import AsyncExitStack
+from typing import Any, Self
 
 import anyio
-from a2a.types import MessageSendParams, TaskIdParams, TaskStatusUpdateEvent
+from a2a.types import MessageSendParams
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
-from agentserve.broker.base import Broker, TaskOperation, _CancelTask, _RunTask
-from agentserve.schema import StreamEvent
+from agentserve.broker.base import (
+    Broker,
+    CancelScope,
+    OperationHandle,
+    TaskOperation,
+    _RunTask,
+)
+
+
+class AnyioCancelScope(CancelScope):
+    """CancelScope backed by an anyio.Event."""
+
+    def __init__(self, event: anyio.Event) -> None:
+        self._event = event
+
+    async def wait(self) -> None:
+        """Block until cancellation is requested."""
+        await self._event.wait()
+
+    def is_set(self) -> bool:
+        """Check if cancellation was requested without blocking."""
+        return self._event.is_set()
+
+
+class InMemoryOperationHandle(OperationHandle):
+    """In-memory handle where ack is a no-op."""
+
+    def __init__(
+        self,
+        op: TaskOperation,
+        requeue: Callable[[TaskOperation], Coroutine[Any, Any, None]],
+    ) -> None:
+        self._op = op
+        self._requeue = requeue
+
+    @property
+    def operation(self) -> TaskOperation:
+        """Return the wrapped operation."""
+        return self._op
+
+    async def ack(self) -> None:
+        """Acknowledge successful processing (no-op for in-memory)."""
+
+    async def nack(self) -> None:
+        """Re-enqueue the operation for retry."""
+        await self._requeue(self._op)
 
 
 class InMemoryBroker(Broker):
     """In-memory broker suitable for single-process deployments."""
 
-    def __init__(self, ops_buffer: int = 1000, event_buffer: int = 200) -> None:
-        """Initialize buffer sizes and internal state."""
+    def __init__(self, ops_buffer: int = 1000) -> None:
+        """Initialize buffer size and internal state."""
         self._ops_buffer = ops_buffer
-        self._event_buffer = event_buffer
-        self._event_subscribers: dict[str, list[MemoryObjectSendStream[StreamEvent]]] = {}
-        self._subscriber_lock: anyio.Lock | None = None
         self._aexit_stack: AsyncExitStack | None = None
         self._ops_write: MemoryObjectSendStream[TaskOperation] | None = None
         self._ops_read: MemoryObjectReceiveStream[TaskOperation] | None = None
+        self._cancel_events: dict[str, anyio.Event] = {}
 
     async def __aenter__(self) -> Self:
-        """Create memory streams and acquire the subscriber lock."""
+        """Create memory streams."""
         self._aexit_stack = AsyncExitStack()
         await self._aexit_stack.__aenter__()
-        self._ops_write, self._ops_read = anyio.create_memory_object_stream[TaskOperation](
-            max_buffer_size=self._ops_buffer
-        )
+        self._ops_write, self._ops_read = anyio.create_memory_object_stream[
+            TaskOperation
+        ](max_buffer_size=self._ops_buffer)
         await self._aexit_stack.enter_async_context(self._ops_write)
         await self._aexit_stack.enter_async_context(self._ops_read)
-        self._subscriber_lock = anyio.Lock()
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
@@ -44,65 +85,41 @@ class InMemoryBroker(Broker):
         if self._aexit_stack is not None:
             await self._aexit_stack.__aexit__(exc_type, exc_value, traceback)
 
-    async def run_task(self, params: MessageSendParams) -> None:
+    async def run_task(
+        self, params: MessageSendParams, *, is_new_task: bool = False
+    ) -> None:
         """Enqueue a run-task operation."""
-        await self._ops_write.send(_RunTask(operation="run", params=params))
-
-    async def cancel_task(self, params: TaskIdParams) -> None:
-        """Enqueue a cancel-task operation."""
-        await self._ops_write.send(_CancelTask(operation="cancel", params=params))
-
-    async def send_stream_event(self, task_id: str, event: StreamEvent) -> None:
-        """Fan out a stream event to all subscribers of a task."""
-        async with self._subscriber_lock:
-            subscribers = self._event_subscribers.get(task_id, [])
-            if not subscribers:
-                return
-            alive: list[MemoryObjectSendStream[StreamEvent]] = []
-            for s in subscribers:
-                try:
-                    await s.send(event)
-                    alive.append(s)
-                except (anyio.ClosedResourceError, anyio.BrokenResourceError):
-                    pass
-            if alive:
-                self._event_subscribers[task_id] = alive
-            else:
-                self._event_subscribers.pop(task_id, None)
-
-    def subscribe_to_stream(self, task_id: str) -> AsyncIterator[StreamEvent]:
-        """Return an async iterator of stream events for a task."""
-        return self._subscribe_iter(task_id)
-
-    async def _subscribe_iter(self, task_id: str) -> AsyncIterator[StreamEvent]:
-        """Yield events until a final status event arrives."""
-        send_stream, recv_stream = anyio.create_memory_object_stream[StreamEvent](
-            max_buffer_size=self._event_buffer
+        await self._ops_write.send(
+            _RunTask(operation="run", params=params, is_new_task=is_new_task)
         )
-        async with self._subscriber_lock:
-            self._event_subscribers.setdefault(task_id, []).append(send_stream)
-        try:
-            async with recv_stream:
-                async for ev in recv_stream:
-                    yield ev
-                    if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
-                        break
-        finally:
-            async with self._subscriber_lock:
-                lst = self._event_subscribers.get(task_id)
-                if lst:
-                    with suppress(ValueError):
-                        lst.remove(send_stream)
-                    if not lst:
-                        self._event_subscribers.pop(task_id, None)
-            await send_stream.aclose()
 
-    def receive_task_operations(self) -> AsyncIterator[TaskOperation]:
-        """Return an async iterator of queued task operations."""
+    async def request_cancel(self, task_id: str) -> None:
+        """Signal cancellation for a task."""
+        self._cancel_events.setdefault(task_id, anyio.Event()).set()
+
+    async def is_cancelled(self, task_id: str) -> bool:
+        """Check if cancellation was requested for a task."""
+        ev = self._cancel_events.get(task_id)
+        return ev is not None and ev.is_set()
+
+    def on_cancel(self, task_id: str) -> CancelScope:
+        """Return a scope that signals when cancellation is requested."""
+        return AnyioCancelScope(self._cancel_events.setdefault(task_id, anyio.Event()))
+
+    async def cleanup_task(self, task_id: str) -> None:
+        """Release resources associated with a completed task."""
+        self._cancel_events.pop(task_id, None)
+
+    def receive_task_operations(self) -> AsyncIterator[OperationHandle]:
+        """Return an async iterator of operation handles."""
         return self._receive_ops()
 
-    async def _receive_ops(self) -> AsyncIterator[TaskOperation]:
-        """Yield operations from the internal queue."""
+    async def _requeue(self, op: TaskOperation) -> None:
+        """Re-enqueue an operation after nack."""
+        await self._ops_write.send(op)
+
+    async def _receive_ops(self) -> AsyncIterator[OperationHandle]:
+        """Yield operation handles from the internal queue."""
         async with self._ops_read:
             async for op in self._ops_read:
-                yield op
+                yield InMemoryOperationHandle(op, self._requeue)

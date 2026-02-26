@@ -1,14 +1,14 @@
-"""Streaming worker – emits word-by-word artifacts with progress updates."""
+"""Streaming worker — emits word-by-word artifacts with progress updates."""
 
 import asyncio
 
-from agentserve import A2AServer, AgentCardConfig, Worker, TaskContext, TaskResult
+from agentserve import A2AServer, AgentCardConfig, TaskContext, Worker
 
 
 class StreamingWorker(Worker):
     """Streams the user's input back word by word."""
 
-    async def handle(self, ctx: TaskContext) -> TaskResult:
+    async def handle(self, ctx: TaskContext) -> None:
         """Split user text into words and emit each as a streaming artifact chunk."""
         words = ctx.user_text.split()
         await ctx.send_status(f"Streaming {len(words)} words...")
@@ -23,11 +23,13 @@ class StreamingWorker(Worker):
             )
             await asyncio.sleep(0.1)
 
-        return TaskResult(artifacts_emitted=True)
+        await ctx.complete()
 
 
 server = A2AServer(
     worker=StreamingWorker(),
-    agent_card=AgentCardConfig(name="Streamer", description="Word-by-word streaming", version="0.1.0"),
+    agent_card=AgentCardConfig(
+        name="Streamer", description="Word-by-word streaming", version="0.1.0"
+    ),
 )
 app = server.as_fastapi_app()

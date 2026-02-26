@@ -1,0 +1,83 @@
+"""In-memory event bus for single-process deployments."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from contextlib import suppress
+
+import anyio
+from a2a.types import TaskStatusUpdateEvent
+from anyio.streams.memory import MemoryObjectSendStream
+
+from agentserve.event_bus.base import EventBus
+from agentserve.schema import StreamEvent
+
+
+class InMemoryEventBus(EventBus):
+    """In-memory fan-out event bus backed by anyio memory streams."""
+
+    def __init__(self, event_buffer: int = 200) -> None:
+        """Initialize buffer size and internal state."""
+        self._event_buffer = event_buffer
+        self._event_subscribers: dict[
+            str, list[MemoryObjectSendStream[StreamEvent]]
+        ] = {}
+        self._subscriber_lock: anyio.Lock | None = None
+
+    async def __aenter__(self):
+        """Acquire the subscriber lock."""
+        self._subscriber_lock = anyio.Lock()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        """Tear down (no-op for in-memory)."""
+
+    async def publish(self, task_id: str, event: StreamEvent) -> None:
+        """Fan out a stream event to all subscribers of a task."""
+        async with self._subscriber_lock:
+            subscribers = self._event_subscribers.get(task_id, [])
+            if not subscribers:
+                return
+            alive: list[MemoryObjectSendStream[StreamEvent]] = []
+            for s in subscribers:
+                try:
+                    await s.send(event)
+                    alive.append(s)
+                except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+                    pass
+            if alive:
+                self._event_subscribers[task_id] = alive
+            else:
+                self._event_subscribers.pop(task_id, None)
+
+    def subscribe(self, task_id: str) -> AsyncIterator[StreamEvent]:
+        """Return an async iterator of stream events for a task."""
+        return self._subscribe_iter(task_id)
+
+    async def _subscribe_iter(self, task_id: str) -> AsyncIterator[StreamEvent]:
+        """Yield events until a final status event arrives."""
+        send_stream, recv_stream = anyio.create_memory_object_stream[StreamEvent](
+            max_buffer_size=self._event_buffer
+        )
+        async with self._subscriber_lock:
+            self._event_subscribers.setdefault(task_id, []).append(send_stream)
+        try:
+            async with recv_stream:
+                async for ev in recv_stream:
+                    yield ev
+                    if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
+                        break
+        finally:
+            async with self._subscriber_lock:
+                lst = self._event_subscribers.get(task_id)
+                if lst:
+                    with suppress(ValueError):
+                        lst.remove(send_stream)
+                    if not lst:
+                        self._event_subscribers.pop(task_id, None)
+            await send_stream.aclose()
+
+    async def cleanup(self, task_id: str) -> None:
+        """Remove subscriber state for a completed task."""
+        async with self._subscriber_lock:
+            self._event_subscribers.pop(task_id, None)

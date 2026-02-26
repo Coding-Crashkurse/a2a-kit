@@ -1,28 +1,31 @@
-"""EventEmitter abstraction â€" decouples TaskContext from Broker and Storage."""
+"""EventEmitter abstraction — decouples TaskContext from EventBus and Storage."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from a2a.types import Artifact, Message
+from a2a.types import Artifact, Message, TaskState
 
+from agentserve.event_bus.base import EventBus
 from agentserve.schema import StreamEvent
+from agentserve.storage.base import Storage
 
 
 class EventEmitter(ABC):
     """Thin interface that TaskContext uses to persist state and broadcast events.
 
-    This keeps TaskContext unaware of Broker and Storage as separate concepts.
+    This keeps TaskContext unaware of EventBus and Storage as separate concepts.
     """
 
     @abstractmethod
     async def update_task(
         self,
         task_id: str,
-        state: str,
+        state: TaskState,
         *,
         artifacts: list[Artifact] | None = None,
         messages: list[Message] | None = None,
+        append_artifact: bool = False,
     ) -> None:
         """Persist a task state change (and optional artifacts/messages)."""
 
@@ -32,23 +35,30 @@ class EventEmitter(ABC):
 
 
 class DefaultEventEmitter(EventEmitter):
-    """Default implementation that delegates to a Broker and Storage pair."""
+    """Default implementation that delegates to an EventBus and Storage pair."""
 
-    def __init__(self, broker, storage) -> None:
-        self._broker = broker
+    def __init__(self, event_bus: EventBus, storage: Storage) -> None:
+        self._event_bus = event_bus
         self._storage = storage
 
     async def update_task(
         self,
         task_id: str,
-        state: str,
+        state: TaskState,
         *,
         artifacts: list[Artifact] | None = None,
         messages: list[Message] | None = None,
+        append_artifact: bool = False,
     ) -> None:
+        """Persist a task state change via storage."""
         await self._storage.update_task(
-            task_id, state=state, new_artifacts=artifacts, new_messages=messages,
+            task_id,
+            state=state,
+            artifacts=artifacts,
+            messages=messages,
+            append_artifact=append_artifact,
         )
 
     async def send_event(self, task_id: str, event: StreamEvent) -> None:
-        await self._broker.send_stream_event(task_id, event)
+        """Broadcast a stream event via event bus."""
+        await self._event_bus.publish(task_id, event)

@@ -9,11 +9,13 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
 
-from a2a.types import MessageSendParams, Task, TaskIdParams, TaskStatusUpdateEvent
+from a2a.types import MessageSendParams, Task, TaskStatusUpdateEvent
 
 from agentserve.broker import Broker
+from agentserve.event_bus.base import EventBus
 from agentserve.schema import StreamEvent
 from agentserve.storage import Storage
+from agentserve.storage.base import ListTasksQuery, ListTasksResult
 
 logger = logging.getLogger(__name__)
 
@@ -24,38 +26,47 @@ class TaskManager:
 
     broker: Broker
     storage: Storage
+    event_bus: EventBus
     default_blocking_timeout_s: float = 30.0
-    _background_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
+    _background_tasks: set[asyncio.Task[Any]] = field(
+        default_factory=set, init=False, repr=False
+    )
 
     async def send_message(self, params: MessageSendParams) -> Task:
         """Submit a task and optionally block until completion."""
         msg = params.message
+        is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
         task = await self.storage.submit_task(context_id, msg)
 
         params.message.context_id = context_id
         params.message.task_id = task.id
 
-        fut = asyncio.create_task(self.broker.run_task(params))
+        fut = asyncio.create_task(self.broker.run_task(params, is_new_task=is_new))
         self._background_tasks.add(fut)
         fut.add_done_callback(self._background_tasks.discard)
 
         if params.configuration and params.configuration.blocking:
             try:
                 async with asyncio.timeout(self.default_blocking_timeout_s):
-                    async for ev in self.broker.subscribe_to_stream(task.id):
+                    async for ev in self.event_bus.subscribe(task.id):
                         if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
                             break
             except TimeoutError:
                 logger.info("Blocking wait timed out for task %s", task.id)
 
-        history_len = getattr(getattr(params, "configuration", None), "history_length", None)
+        history_len = getattr(
+            getattr(params, "configuration", None), "history_length", None
+        )
         latest = await self.storage.load_task(task.id, history_length=history_len)
         return latest or task
 
-    async def stream_message(self, params: MessageSendParams) -> AsyncGenerator[StreamEvent, None]:
+    async def stream_message(
+        self, params: MessageSendParams
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Submit a task, yield initial snapshot, then stream live events."""
         msg = params.message
+        is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
         task = await self.storage.submit_task(context_id, msg)
         yield task
@@ -63,22 +74,29 @@ class TaskManager:
         params.message.context_id = context_id
         params.message.task_id = task.id
 
-        fut = asyncio.create_task(self.broker.run_task(params))
+        fut = asyncio.create_task(self.broker.run_task(params, is_new_task=is_new))
         self._background_tasks.add(fut)
         fut.add_done_callback(self._background_tasks.discard)
 
-        async for ev in self.broker.subscribe_to_stream(task.id):
+        async for ev in self.event_bus.subscribe(task.id):
             yield ev
 
-    async def get_task(self, task_id: str, history_length: int | None = None) -> Task | None:
+    async def get_task(
+        self, task_id: str, history_length: int | None = None
+    ) -> Task | None:
         """Load a single task by ID."""
         return await self.storage.load_task(task_id, history_length)
 
-    async def list_tasks(self, limit: int = 50) -> list[Task]:
-        """Return up to limit tasks."""
-        return await self.storage.list_tasks(limit)
+    async def list_tasks(self, query: ListTasksQuery) -> ListTasksResult:
+        """Return filtered and paginated tasks."""
+        return await self.storage.list_tasks(query)
 
     async def cancel_task(self, task_id: str) -> Task | None:
-        """Request cancellation of a task and return its current state."""
-        await self.broker.cancel_task(TaskIdParams(id=task_id))
+        """Request cancellation of a task and return its current state.
+
+        Signals the broker to cancel the task. The worker is responsible
+        for the actual state transition to avoid races with concurrent
+        complete/fail calls.
+        """
+        await self.broker.request_cancel(task_id)
         return await self.storage.load_task(task_id)

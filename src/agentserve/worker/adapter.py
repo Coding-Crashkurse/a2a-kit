@@ -1,4 +1,4 @@
-"""WorkerAdapter — orchestrates broker loop, context building, execution, and finalization."""
+"""WorkerAdapter — orchestrates broker loop, context building, and execution."""
 
 from __future__ import annotations
 
@@ -15,18 +15,17 @@ from a2a.types import (
     MessageSendParams,
     Part,
     Role,
-    TaskIdParams,
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
     TextPart,
 )
 
-from agentserve.broker import Broker, TaskOperation
+from agentserve.broker import Broker, OperationHandle
+from agentserve.event_bus.base import EventBus
 from agentserve.storage import Storage
 from agentserve.worker.base import Worker
 from agentserve.worker.context_factory import ContextFactory
-from agentserve.worker.result_finalizer import ResultFinalizer
 
 logger = logging.getLogger(__name__)
 
@@ -34,18 +33,26 @@ logger = logging.getLogger(__name__)
 class WorkerAdapter:
     """Bridges a user Worker to the internal broker loop.
 
-    Delegates context building to ContextFactory and result
-    translation to ResultFinalizer — itself only orchestrates
-    the lifecycle: receive ops, run/cancel, handle errors.
+    Delegates context building to ContextFactory — itself only
+    orchestrates the lifecycle: receive ops, run/cancel, handle errors.
     """
 
-    def __init__(self, user_worker: Worker, broker: Broker, storage: Storage) -> None:
+    def __init__(
+        self,
+        user_worker: Worker,
+        broker: Broker,
+        storage: Storage,
+        event_bus: EventBus,
+        *,
+        max_concurrent_tasks: int | None = None,
+    ) -> None:
         self._user_worker = user_worker
         self._broker = broker
-        self._storage = storage
-        self._context_factory = ContextFactory(broker, storage)
-        self._finalizer = ResultFinalizer(broker, storage)
-        self._cancel_events: dict[str, anyio.Event] = {}
+        self._event_bus = event_bus
+        self._context_factory = ContextFactory(event_bus, storage)
+        self._semaphore = (
+            anyio.Semaphore(max_concurrent_tasks) if max_concurrent_tasks else None
+        )
 
     @asynccontextmanager
     async def run(self) -> AsyncIterator[None]:
@@ -59,26 +66,45 @@ class WorkerAdapter:
 
     async def _broker_loop(self) -> None:
         """Continuously receive and dispatch broker operations."""
-        async for op in self._broker.receive_task_operations():
-            await self._dispatch(op)
+        async with anyio.create_task_group() as tg:
+            async for handle in self._broker.receive_task_operations():
+                tg.start_soon(self._handle_op, handle)
 
-    async def _dispatch(self, op: TaskOperation) -> None:
-        """Route an operation to the appropriate handler."""
+    async def _handle_op(self, handle: OperationHandle) -> None:
+        """Execute a single operation with ack/nack handling.
+
+        Catches all exceptions so a single failed operation never tears
+        down the entire TaskGroup and its sibling tasks.
+        """
         try:
-            if op.operation == "run":
-                await self._run_task(op.params)
-            elif op.operation == "cancel":
-                await self._cancel_task(op.params)
-        except Exception:
-            task_id = self._extract_task_id(op.params)
-            if task_id:
-                try:
-                    await self._storage.update_task(task_id, state="failed")
-                except Exception:
-                    logger.exception("Failed to mark task %s as failed", task_id)
-            logger.exception("Worker error handling operation")
+            if self._semaphore:
+                async with self._semaphore:
+                    await self._handle_op_inner(handle)
+            else:
+                await self._handle_op_inner(handle)
+        except BaseException:
+            logger.exception("Unrecoverable error in operation handler")
 
-    async def _run_task(self, params: MessageSendParams) -> None:
+    async def _handle_op_inner(self, handle: OperationHandle) -> None:
+        """Dispatch, ack on success, nack on failure."""
+        try:
+            await self._dispatch(handle.operation)
+            await handle.ack()
+        except Exception:
+            try:
+                await handle.nack()
+            except Exception:
+                logger.exception("nack itself failed")
+            logger.exception("Operation failed, nacked")
+
+    async def _dispatch(self, op: Any) -> None:
+        """Route an operation to the appropriate handler."""
+        if op.operation == "run":
+            await self._run_task(op.params, is_new_task=op.is_new_task)
+
+    async def _run_task(
+        self, params: MessageSendParams, *, is_new_task: bool = False
+    ) -> None:
         """Execute the user worker for a submitted task."""
         message = params.message
         task_id = message.task_id
@@ -86,48 +112,59 @@ class WorkerAdapter:
         if not task_id:
             raise ValueError("message.task_id is missing")
 
-        cancel_event = self._cancel_events.setdefault(task_id, anyio.Event())
-        if cancel_event.is_set():
-            await self._mark_canceled(task_id, context_id)
+        emitter = self._context_factory.emitter
+        cancel_event = self._broker.on_cancel(task_id)
+        if await self._broker.is_cancelled(task_id):
+            await self._mark_canceled(emitter, task_id, context_id)
             return
 
-        ctx = self._context_factory.build(message, cancel_event)
+        ctx = await self._context_factory.build(
+            message, cancel_event, is_new_task=is_new_task
+        )
 
-        await self._storage.update_task(task_id, state=TaskState.working.value)
-        await ctx._emit_status(TaskState.working)
+        await emitter.update_task(task_id, state=TaskState.working)
+        await ctx.send_status()
 
         try:
-            result = await self._user_worker.handle(ctx)
-            await self._finalizer.finalize(ctx, result)
+            await self._user_worker.handle(ctx)
+            if not ctx.turn_ended:
+                await ctx.fail(
+                    "Worker returned without calling a lifecycle method "
+                    "(complete/fail/reject/respond/request_input/request_auth)"
+                )
         except anyio.get_cancelled_exc_class():
-            await self._mark_canceled(task_id, context_id)
+            await self._mark_canceled(emitter, task_id, context_id)
         except Exception as exc:
             logger.exception("Worker error for task %s", task_id)
-            await self._mark_failed(task_id, context_id, str(exc))
+            await self._mark_failed(emitter, task_id, context_id, str(exc))
         finally:
-            self._cancel_events.pop(task_id, None)
+            await self._event_bus.cleanup(task_id)
+            await self._broker.cleanup_task(task_id)
 
-    async def _cancel_task(self, params: TaskIdParams) -> None:
-        """Signal cancellation for a task."""
-        task_id = params.id
-        if task_id:
-            self._cancel_events.setdefault(task_id, anyio.Event()).set()
-
-    async def _mark_canceled(self, task_id: str, context_id: str | None) -> None:
+    @staticmethod
+    async def _mark_canceled(emitter, task_id: str, context_id: str | None) -> None:
         """Persist canceled state and emit a final status event."""
-        await self._storage.update_task(task_id, state=TaskState.canceled.value)
-        status = TaskStatus(state=TaskState.canceled, timestamp=datetime.now(UTC).isoformat())
-        await self._broker.send_stream_event(
+        await emitter.update_task(task_id, state=TaskState.canceled)
+        status = TaskStatus(
+            state=TaskState.canceled, timestamp=datetime.now(UTC).isoformat()
+        )
+        await emitter.send_event(
             task_id,
             TaskStatusUpdateEvent(
-                kind="status-update", task_id=task_id, context_id=context_id,
-                status=status, final=True,
+                kind="status-update",
+                task_id=task_id,
+                context_id=context_id,
+                status=status,
+                final=True,
             ),
         )
 
-    async def _mark_failed(self, task_id: str, context_id: str | None, reason: str) -> None:
+    @staticmethod
+    async def _mark_failed(
+        emitter, task_id: str, context_id: str | None, reason: str
+    ) -> None:
         """Persist failed state and emit a final status event with the error."""
-        await self._storage.update_task(task_id, state=TaskState.failed.value)
+        await emitter.update_task(task_id, state=TaskState.failed)
         status = TaskStatus(
             state=TaskState.failed,
             timestamp=datetime.now(UTC).isoformat(),
@@ -137,22 +174,13 @@ class WorkerAdapter:
                 message_id=str(uuid.uuid4()),
             ),
         )
-        await self._broker.send_stream_event(
+        await emitter.send_event(
             task_id,
             TaskStatusUpdateEvent(
-                kind="status-update", task_id=task_id, context_id=context_id,
-                status=status, final=True,
+                kind="status-update",
+                task_id=task_id,
+                context_id=context_id,
+                status=status,
+                final=True,
             ),
         )
-
-    @staticmethod
-    def _extract_task_id(params: Any) -> str | None:
-        """Try to extract a task_id from various param types."""
-        if params is None:
-            return None
-        if hasattr(params, "id") and params.id:
-            return params.id
-        message = getattr(params, "message", None)
-        if message:
-            return getattr(message, "task_id", None) or getattr(message, "taskId", None)
-        return None

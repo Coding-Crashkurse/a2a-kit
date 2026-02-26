@@ -1,4 +1,4 @@
-"""LangGraph worker – runs a graph with custom streaming, no LLM needed."""
+"""LangGraph worker — runs a graph with custom streaming, no LLM needed."""
 
 import asyncio
 from typing import TypedDict
@@ -6,7 +6,7 @@ from typing import TypedDict
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from agentserve import A2AServer, AgentCardConfig, Worker, TaskContext, TaskResult
+from agentserve import A2AServer, AgentCardConfig, TaskContext, Worker
 
 TOTAL = 10
 BROKEN = {4, 7}
@@ -36,7 +36,9 @@ async def process_node(state: FileProcessingState):
             succeeded += 1
             writer({"type": "done", "file": name, "index": i, "total": TOTAL})
 
-    writer({"type": "summary", "succeeded": succeeded, "failed": failed, "total": TOTAL})
+    writer(
+        {"type": "summary", "succeeded": succeeded, "failed": failed, "total": TOTAL}
+    )
     return {}
 
 
@@ -52,7 +54,7 @@ graph = (
 class LangGraphWorker(Worker):
     """Runs a LangGraph file-processing pipeline and streams results via A2A."""
 
-    async def handle(self, ctx: TaskContext) -> TaskResult:
+    async def handle(self, ctx: TaskContext) -> None:
         """Execute the graph and forward custom stream events as A2A artifacts."""
         await ctx.send_status("Starting file processing pipeline...")
         lines: list[str] = []
@@ -76,7 +78,7 @@ class LangGraphWorker(Worker):
                     f"{chunk['failed']} failed"
                 )
 
-        return TaskResult(text="\n".join(lines))
+        await ctx.complete("\n".join(lines))
 
 
 server = A2AServer(

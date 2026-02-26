@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from a2a.types import AgentCard, MessageSendParams, Task
-from fastapi import APIRouter, HTTPException, Path, Request
+from a2a.types import AgentCard, MessageSendParams, Task, TaskState
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from sse_starlette import EventSourceResponse
 
+from agentserve.storage.base import ListTasksQuery, ListTasksResult
 from agentserve.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,10 @@ def _validate_ids(params: MessageSendParams) -> MessageSendParams:
     """Validate that messageId is present."""
     msg = params.message
     if not msg.message_id or not msg.message_id.strip():
-        raise HTTPException(status_code=400, detail={"code": -32600, "message": "messageId is required."})
+        raise HTTPException(
+            status_code=400,
+            detail={"code": -32600, "message": "messageId is required."},
+        )
     return params
 
 
@@ -42,7 +46,9 @@ def build_a2a_router() -> APIRouter:
         return await tm.send_message(params)
 
     @router.post("/v1/message:stream")
-    async def message_stream(request: Request, params: MessageSendParams) -> EventSourceResponse:
+    async def message_stream(
+        request: Request, params: MessageSendParams
+    ) -> EventSourceResponse:
         """Submit a message and stream events via SSE."""
         params = _validate_ids(params)
         tm = _get_tm(request)
@@ -71,14 +77,34 @@ def build_a2a_router() -> APIRouter:
         tm = _get_tm(request)
         t = await tm.get_task(task_id, history_length)
         if not t:
-            raise HTTPException(status_code=404, detail={"code": -32001, "message": "Task not found"})
+            raise HTTPException(
+                status_code=404, detail={"code": -32001, "message": "Task not found"}
+            )
         return t
 
     @router.get("/v1/tasks")
-    async def tasks_list(request: Request, limit: int = 50) -> list[Task]:
-        """List all tasks up to the given limit."""
+    async def tasks_list(
+        request: Request,
+        context_id: str | None = Query(None, alias="contextId"),
+        status: TaskState | None = None,
+        page_size: int = Query(50, alias="pageSize"),
+        page_token: str | None = Query(None, alias="pageToken"),
+        history_length: int | None = Query(None, alias="historyLength"),
+        status_timestamp_after: str | None = Query(None, alias="statusTimestampAfter"),
+        include_artifacts: bool = Query(False, alias="includeArtifacts"),
+    ) -> ListTasksResult:
+        """List tasks with optional filters and pagination."""
         tm = _get_tm(request)
-        return await tm.list_tasks(limit)
+        query = ListTasksQuery(
+            context_id=context_id,
+            status=status,
+            page_size=page_size,
+            page_token=page_token,
+            history_length=history_length,
+            status_timestamp_after=status_timestamp_after,
+            include_artifacts=include_artifacts,
+        )
+        return await tm.list_tasks(query)
 
     @router.post("/v1/tasks/{task_id}:cancel")
     async def tasks_cancel(
@@ -89,7 +115,9 @@ def build_a2a_router() -> APIRouter:
         tm = _get_tm(request)
         t = await tm.cancel_task(task_id)
         if not t:
-            raise HTTPException(status_code=404, detail={"code": -32001, "message": "Task not found"})
+            raise HTTPException(
+                status_code=404, detail={"code": -32001, "message": "Task not found"}
+            )
         return t
 
     @router.get("/v1/health")
