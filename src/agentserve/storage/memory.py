@@ -5,10 +5,12 @@ from __future__ import annotations
 import copy
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from a2a.types import Artifact, Message, Task, TaskState, TaskStatus
 
 from agentserve.storage.base import (
+    ArtifactWrite,
     ContextMismatchError,
     ContextT,
     ListTasksQuery,
@@ -33,16 +35,38 @@ class InMemoryStorage(Storage[ContextT]):
             msg_obj.task_id = task.id
             msg_obj.context_id = task.context_id
 
+    @staticmethod
+    def _trim_history(
+        history: list[Message] | None, history_length: int | None
+    ) -> list[Message] | None:
+        """Trim history to the last N messages.
+
+        Returns the full history when ``history_length`` is ``None``.
+        Returns an empty list when ``history_length`` is ``0``.
+        This avoids the Python falsy-check pitfall where ``0`` would
+        previously skip trimming entirely.
+        """
+        if history_length is None or history is None:
+            return history
+        if history_length == 0:
+            return []
+        return history[-history_length:]
+
     async def load_task(
-        self, task_id: str, history_length: int | None = None
+        self,
+        task_id: str,
+        history_length: int | None = None,
+        *,
+        include_artifacts: bool = True,
     ) -> Task | None:
         """Load a task by ID, optionally trimming history."""
         task = self.tasks.get(task_id)
         if not task:
             return None
         t = copy.deepcopy(task)
-        if history_length and t.history:
-            t.history = t.history[-history_length:]
+        t.history = self._trim_history(t.history, history_length)
+        if not include_artifacts:
+            t.artifacts = None
         return t
 
     async def list_tasks(self, query: ListTasksQuery) -> ListTasksResult:
@@ -73,8 +97,7 @@ class InMemoryStorage(Storage[ContextT]):
         results: list[Task] = []
         for t in page:
             t = copy.deepcopy(t)
-            if query.history_length and t.history:
-                t.history = t.history[-query.history_length :]
+            t.history = self._trim_history(t.history, query.history_length)
             if not query.include_artifacts:
                 t.artifacts = None
             results.append(t)
@@ -110,17 +133,12 @@ class InMemoryStorage(Storage[ContextT]):
 
     async def append_message(self, task_id: str, message: Message) -> Task:
         """Append a follow-up message to an existing task."""
-        existing = self.tasks.get(task_id)
-        if (
-            existing
-            and message.context_id
-            and existing.context_id != message.context_id
-        ):
+        task = self._get_task_or_raise(task_id)
+        if message.context_id and task.context_id != message.context_id:
             raise ContextMismatchError(
                 f"contextId {message.context_id!r} does not match "
-                f"task {task_id!r} contextId {existing.context_id!r}"
+                f"task {task_id!r} contextId {task.context_id!r}"
             )
-        task = self._get_task_or_raise(task_id)
         current = task.status.state
         if self._is_terminal(current):
             raise TaskTerminalStateError("task is terminal")
@@ -170,16 +188,77 @@ class InMemoryStorage(Storage[ContextT]):
         task = self._get_task_or_raise(task_id)
         if self._is_terminal(task.status.state):
             raise TaskTerminalStateError("task is terminal")
-        if append:
-            existing = next(
-                (a for a in task.artifacts if a.artifact_id == artifact.artifact_id),
-                None,
-            )
-            if existing:
-                existing.parts.extend(artifact.parts)
-                return copy.deepcopy(task)
-        task.artifacts.append(artifact)
+        self._apply_artifact(task, artifact, append=append)
         return copy.deepcopy(task)
+
+    async def update_task(
+        self,
+        task_id: str,
+        state: TaskState | None = None,
+        *,
+        artifacts: list[ArtifactWrite] | None = None,
+        messages: list[Message] | None = None,
+        task_metadata: dict[str, Any] | None = None,
+    ) -> Task:
+        """Atomically apply messages, artifacts, and state transition.
+
+        When ``state`` is ``None`` the current state is preserved.
+        All precondition checks run before any mutation so that a failure
+        in one step never leaves the task in a partially-updated state.
+        """
+        task = self._get_task_or_raise(task_id)
+        current = task.status.state
+        effective_state = state if state is not None else current
+
+        # 1. Terminal guard — must be FIRST
+        if self._handle_terminal_update(current, effective_state, artifacts, messages):
+            return copy.deepcopy(task)
+
+        # 2. Validate all preconditions BEFORE any mutation
+        if messages:
+            self._enforce_message_roles(current, messages)
+        # (artifacts have no precondition beyond terminal, already checked)
+
+        # 3. Apply all mutations
+        if messages:
+            self._assign_messages(task, messages)
+            task.history.extend(messages)
+
+        if artifacts:
+            for aw in artifacts:
+                self._apply_artifact(task, aw.artifact, append=aw.append)
+
+        if task_metadata:
+            if task.metadata is None:
+                task.metadata = {}
+            task.metadata.update(task_metadata)
+
+        if state is not None:
+            task.status = TaskStatus(
+                state=state, timestamp=datetime.now(UTC).isoformat()
+            )
+
+        return copy.deepcopy(task)
+
+    def _apply_artifact(
+        self, task: Task, artifact: Artifact, *, append: bool
+    ) -> None:
+        """Apply a single artifact upsert to the task (in-place)."""
+        existing_idx = next(
+            (
+                i
+                for i, a in enumerate(task.artifacts)
+                if a.artifact_id == artifact.artifact_id
+            ),
+            None,
+        )
+        if existing_idx is not None:
+            if append:
+                task.artifacts[existing_idx].parts.extend(artifact.parts)
+            else:
+                task.artifacts[existing_idx] = artifact
+        else:
+            task.artifacts.append(artifact)
 
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task by ID. Returns True if the task existed."""

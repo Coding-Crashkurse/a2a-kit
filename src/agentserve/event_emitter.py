@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from typing import Any
 
-from a2a.types import Artifact, Message, Task, TaskState
+from a2a.types import Message, Task, TaskState
 
 from agentserve.event_bus.base import EventBus
 from agentserve.schema import StreamEvent
-from agentserve.storage.base import Storage
+from agentserve.storage.base import ArtifactWrite, Storage
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,21 @@ class EventEmitter(ABC):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState,
+        state: TaskState | None = None,
         *,
-        artifacts: list[Artifact] | None = None,
+        artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
-        append_artifact: bool = False,
+        task_metadata: dict[str, Any] | None = None,
     ) -> Task:
-        """Persist a task state change (and optional artifacts/messages)."""
+        """Persist a task state change (and optional artifacts/messages).
+
+        When ``state`` is ``None`` the current state is preserved.
+
+        Note: The return value is currently unused by all callers in
+        ``TaskContextImpl``.  Storage backends may return a lightweight
+        Task shell (without full history/artifacts) to avoid expensive
+        reads on write paths.
+        """
 
     @abstractmethod
     async def send_event(self, task_id: str, event: StreamEvent) -> None:
@@ -51,11 +60,11 @@ class DefaultEventEmitter(EventEmitter):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState,
+        state: TaskState | None = None,
         *,
-        artifacts: list[Artifact] | None = None,
+        artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
-        append_artifact: bool = False,
+        task_metadata: dict[str, Any] | None = None,
     ) -> Task:
         """Persist a task state change via storage."""
         return await self._storage.update_task(
@@ -63,7 +72,7 @@ class DefaultEventEmitter(EventEmitter):
             state=state,
             artifacts=artifacts,
             messages=messages,
-            append_artifact=append_artifact,
+            task_metadata=task_metadata,
         )
 
     async def send_event(self, task_id: str, event: StreamEvent) -> None:

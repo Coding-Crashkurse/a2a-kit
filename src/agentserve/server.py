@@ -25,6 +25,7 @@ from agentserve.storage import (
     TaskNotAcceptingMessagesError,
     TaskNotFoundError,
     TaskTerminalStateError,
+    UnsupportedOperationError,
 )
 from agentserve.task_manager import TaskManager
 from agentserve.worker import Worker, WorkerAdapter
@@ -169,3 +170,10 @@ def _register_exception_handlers(app: FastAPI) -> None:
             else "Task does not accept messages."
         )
         return JSONResponse(status_code=422, content={"code": -32602, "message": msg})
+
+    @app.exception_handler(UnsupportedOperationError)
+    async def _(_req: Request, exc: UnsupportedOperationError):
+        return JSONResponse(
+            status_code=400,
+            content={"code": -32004, "message": str(exc)},
+        )

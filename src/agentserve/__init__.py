@@ -11,12 +11,15 @@ from agentserve.event_bus import EventBus, InMemoryEventBus
 from agentserve.event_emitter import DefaultEventEmitter, EventEmitter
 from agentserve.server import A2AServer
 from agentserve.storage import (
+    ArtifactWrite,
     ContextMismatchError,
     InMemoryStorage,
     Storage,
     TaskNotAcceptingMessagesError,
+    TaskNotCancelableError,
     TaskNotFoundError,
     TaskTerminalStateError,
+    UnsupportedOperationError,
 )
 from agentserve.storage.base import ListTasksQuery, ListTasksResult
 from agentserve.task_manager import TaskManager
@@ -25,6 +28,7 @@ from agentserve.worker import FileInfo, TaskContext, Worker
 __all__ = [
     "A2AServer",
     "AgentCardConfig",
+    "ArtifactWrite",
     "Broker",
     "CancelRegistry",
     "ContextMismatchError",
@@ -44,7 +48,9 @@ __all__ = [
     "TaskContext",
     "TaskManager",
     "TaskNotAcceptingMessagesError",
+    "TaskNotCancelableError",
     "TaskNotFoundError",
     "TaskTerminalStateError",
+    "UnsupportedOperationError",
     "Worker",
 ]

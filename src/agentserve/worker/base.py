@@ -28,7 +28,8 @@ from a2a.types import (
 
 from agentserve.broker.base import CancelScope
 from agentserve.event_emitter import EventEmitter
-from agentserve.storage.base import Storage
+from agentserve.schema import DIRECT_REPLY_KEY, DirectReply
+from agentserve.storage.base import ArtifactWrite, Storage
 
 logger = logging.getLogger(__name__)
 
@@ -209,11 +210,15 @@ class TaskContext(ABC):
         """Artifacts already produced by this task in previous turns."""
 
     @abstractmethod
-    async def complete(self, text: str | None = None) -> None:
+    async def complete(
+        self, text: str | None = None, *, artifact_id: str = "final-answer"
+    ) -> None:
         """Mark the task as completed, optionally with a final text artifact."""
 
     @abstractmethod
-    async def complete_json(self, data: dict | list) -> None:
+    async def complete_json(
+        self, data: dict | list, *, artifact_id: str = "final-answer"
+    ) -> None:
         """Complete task with a JSON data artifact."""
 
     @abstractmethod
@@ -235,6 +240,22 @@ class TaskContext(ABC):
     @abstractmethod
     async def respond(self, text: str | None = None) -> None:
         """Complete the task with a direct message response (no artifact created)."""
+
+    @abstractmethod
+    async def reply_directly(self, text: str) -> None:
+        """Return a Message directly without task tracking.
+
+        The HTTP response to ``message:send`` will be
+        ``{"message": {...}}`` instead of ``{"task": {...}}``.
+        The task is still created internally for lifecycle management
+        but the client receives only the message.
+
+        **Streaming note:** When the request arrives via ``message:stream``,
+        this method uses the Task lifecycle stream pattern (Task snapshot
+        followed by events and a terminal status update) rather than a
+        message-only stream.  This is spec-conformant (§3.1.2) — servers
+        may always respond with a Task lifecycle stream.
+        """
 
     @abstractmethod
     async def send_status(self, message: str | None = None) -> None:
@@ -366,28 +387,32 @@ class TaskContextImpl(TaskContext):
         """All structured data parts from the user message."""
         return _extract_data_parts(self.parts)
 
-    async def complete(self, text: str | None = None) -> None:
+    async def complete(
+        self, text: str | None = None, *, artifact_id: str = "final-answer"
+    ) -> None:
         """Mark the task as completed, optionally with a final text artifact."""
-        artifacts = None
+        artifact_writes: list[ArtifactWrite] | None = None
+        artifact: Artifact | None = None
 
         if text:
             final_parts = [Part(TextPart(text=text))]
-            artifacts = [Artifact(artifact_id="final-answer", parts=final_parts)]
+            artifact = Artifact(artifact_id=artifact_id, parts=final_parts)
+            artifact_writes = [ArtifactWrite(artifact)]
 
         await self._emitter.update_task(
             self.task_id,
             state=TaskState.completed,
-            artifacts=artifacts,
+            artifacts=artifact_writes,
         )
 
-        if artifacts:
+        if artifact is not None:
             await self._emitter.send_event(
                 self.task_id,
                 TaskArtifactUpdateEvent(
                     kind="artifact-update",
                     task_id=self.task_id,
                     context_id=self.context_id,
-                    artifact=artifacts[0],
+                    artifact=artifact,
                     append=False,
                     last_chunk=True,
                 ),
@@ -396,11 +421,13 @@ class TaskContextImpl(TaskContext):
         await self._emit_status(TaskState.completed)
         self._turn_ended = True
 
-    async def complete_json(self, data: dict | list) -> None:
+    async def complete_json(
+        self, data: dict | list, *, artifact_id: str = "final-answer"
+    ) -> None:
         """Complete task with a JSON data artifact."""
         data_parts = [Part(DataPart(data=data))]
         artifact = Artifact(
-            artifact_id="final-answer",
+            artifact_id=artifact_id,
             parts=data_parts,
             metadata={"media_type": "application/json"},
         )
@@ -408,7 +435,7 @@ class TaskContextImpl(TaskContext):
         await self._emitter.update_task(
             self.task_id,
             state=TaskState.completed,
-            artifacts=[artifact],
+            artifacts=[ArtifactWrite(artifact)],
         )
 
         await self._emitter.send_event(
@@ -428,25 +455,59 @@ class TaskContextImpl(TaskContext):
 
     async def fail(self, reason: str) -> None:
         """Mark the task as failed with an error reason."""
-        await self._emitter.update_task(self.task_id, state=TaskState.failed)
+        fail_message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text=reason))],
+            message_id=str(uuid.uuid4()),
+            metadata=self.metadata,
+        )
+        await self._emitter.update_task(
+            self.task_id, state=TaskState.failed, messages=[fail_message]
+        )
         await self._emit_status(TaskState.failed, message_text=reason)
         self._turn_ended = True
 
     async def reject(self, reason: str | None = None) -> None:
         """Reject the task — agent decides not to perform it."""
-        await self._emitter.update_task(self.task_id, state=TaskState.rejected)
+        reject_text = reason or "Task rejected."
+        reject_message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text=reject_text))],
+            message_id=str(uuid.uuid4()),
+            metadata=self.metadata,
+        )
+        await self._emitter.update_task(
+            self.task_id, state=TaskState.rejected, messages=[reject_message]
+        )
         await self._emit_status(TaskState.rejected, message_text=reason)
         self._turn_ended = True
 
     async def request_input(self, question: str) -> None:
         """Transition to input-required state."""
-        await self._emitter.update_task(self.task_id, state=TaskState.input_required)
+        input_message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text=question))],
+            message_id=str(uuid.uuid4()),
+            metadata=self.metadata,
+        )
+        await self._emitter.update_task(
+            self.task_id, state=TaskState.input_required, messages=[input_message]
+        )
         await self._emit_status(TaskState.input_required, message_text=question)
         self._turn_ended = True
 
     async def request_auth(self, details: str | None = None) -> None:
         """Transition to auth-required state for secondary credentials."""
-        await self._emitter.update_task(self.task_id, state=TaskState.auth_required)
+        auth_text = details or "Authentication required."
+        auth_message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text=auth_text))],
+            message_id=str(uuid.uuid4()),
+            metadata=self.metadata,
+        )
+        await self._emitter.update_task(
+            self.task_id, state=TaskState.auth_required, messages=[auth_message]
+        )
         await self._emit_status(TaskState.auth_required, message_text=details)
         self._turn_ended = True
 
@@ -465,7 +526,37 @@ class TaskContextImpl(TaskContext):
             messages=[message],
         )
         await self._emitter.send_event(self.task_id, message)
+        await self._emit_status(TaskState.completed)
         self._responded_with_message = True
+        self._turn_ended = True
+
+    async def reply_directly(self, text: str) -> None:
+        """Return a Message directly without task tracking.
+
+        The task is marked as completed internally but the HTTP response
+        to ``message:send`` will be ``{"message": {...}}`` instead of
+        ``{"task": {...}}``.
+
+        The direct-reply marker is stored in ``Task.metadata`` (not
+        ``Message.metadata``) so it survives storage round-trips
+        without polluting user-facing message data.  The EventBus
+        receives a :class:`DirectReply` wrapper so subscribers can
+        distinguish this from a normal agent message.
+        """
+        message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text=text))],
+            message_id=str(uuid.uuid4()),
+            metadata=self.metadata,
+        )
+        await self._emitter.update_task(
+            self.task_id,
+            state=TaskState.completed,
+            messages=[message],
+            task_metadata={DIRECT_REPLY_KEY: message.message_id},
+        )
+        await self._emitter.send_event(self.task_id, DirectReply(message=message))
+        await self._emit_status(TaskState.completed)
         self._turn_ended = True
 
     async def send_status(self, message: str | None = None) -> None:
@@ -506,9 +597,7 @@ class TaskContextImpl(TaskContext):
         )
         await self._emitter.update_task(
             self.task_id,
-            state=TaskState.working,
-            artifacts=[artifact],
-            append_artifact=append,
+            artifacts=[ArtifactWrite(artifact, append=append)],
         )
         await self._emitter.send_event(
             self.task_id,
@@ -563,7 +652,14 @@ class TaskContextImpl(TaskContext):
         message_text: str | None = None,
         final: bool | None = None,
     ) -> None:
-        """Build and broadcast a TaskStatusUpdateEvent."""
+        """Build and broadcast a TaskStatusUpdateEvent.
+
+        ``final`` controls whether the SSE stream ends after this event.
+        It does NOT mean the task has reached a terminal state.  States
+        like ``auth_required`` and ``input_required`` set ``final=True``
+        because the client must reconnect after these responses, even
+        though the task itself is not terminal.
+        """
         if final is None:
             final = state in {
                 TaskState.completed,

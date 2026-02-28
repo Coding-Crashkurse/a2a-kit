@@ -39,7 +39,7 @@ class AgentCardConfig(BaseModel):
     name: str
     description: str
     version: str = "1.0.0"
-    protocol_version: str = "0.3.0"
+    protocol_version: str = "0.3"
     skills: list[SkillConfig] = Field(default_factory=list)
     extensions: list[ExtensionConfig] = Field(default_factory=list)
 

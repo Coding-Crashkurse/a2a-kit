@@ -32,12 +32,12 @@ class InMemoryEventBus(EventBus):
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
         """Tear down (no-op for in-memory)."""
 
-    async def publish(self, task_id: str, event: StreamEvent) -> None:
+    async def publish(self, task_id: str, event: StreamEvent) -> str | None:
         """Fan out a stream event to all subscribers of a task."""
         async with self._subscriber_lock:
             subscribers = self._event_subscribers.get(task_id, [])
             if not subscribers:
-                return
+                return None
             alive: list[MemoryObjectSendStream[StreamEvent]] = []
             for s in subscribers:
                 try:
@@ -49,9 +49,12 @@ class InMemoryEventBus(EventBus):
                 self._event_subscribers[task_id] = alive
             else:
                 self._event_subscribers.pop(task_id, None)
+        return None
 
-    async def subscribe(self, task_id: str) -> AsyncIterator[StreamEvent]:
-        """Subscribe to stream events for a task. Setup may be async."""
+    async def subscribe(
+        self, task_id: str, *, after_event_id: str | None = None
+    ) -> AsyncIterator[StreamEvent]:
+        """Subscribe to stream events (after_event_id is ignored)."""
         return self._subscribe_iter(task_id)
 
     async def _subscribe_iter(self, task_id: str) -> AsyncIterator[StreamEvent]:

@@ -76,11 +76,16 @@ class InMemoryOperationHandle(OperationHandle):
         """Return the wrapped operation."""
         return self._op
 
+    @property
+    def attempt(self) -> int:
+        """Always 1 for in-memory (no retry tracking)."""
+        return 1
+
     async def ack(self) -> None:
         """Acknowledge successful processing (no-op for in-memory)."""
 
-    async def nack(self) -> None:
-        """Re-enqueue the operation for retry."""
+    async def nack(self, *, delay_seconds: float = 0) -> None:
+        """Re-enqueue immediately (delay_seconds is ignored)."""
         await self._requeue(self._op)
 
 

@@ -41,13 +41,27 @@ class OperationHandle(ABC):
     def operation(self) -> TaskOperation:
         """Return the wrapped operation."""
 
+    @property
+    @abstractmethod
+    def attempt(self) -> int:
+        """Delivery attempt number (1-based).
+
+        InMemory always returns 1.  Backends with retry tracking
+        (e.g. RabbitMQ, Redis) report the actual delivery count.
+        """
+
     @abstractmethod
     async def ack(self) -> None:
         """Acknowledge successful processing."""
 
     @abstractmethod
-    async def nack(self) -> None:
-        """Reject — return operation to queue for retry."""
+    async def nack(self, *, delay_seconds: float = 0) -> None:
+        """Reject — return operation to queue for retry.
+
+        ``delay_seconds`` is a hint for backends that support delayed
+        re-delivery (e.g. RabbitMQ dead-letter TTL, Redis delayed queue).
+        InMemory ignores it and re-enqueues immediately.
+        """
 
 
 class CancelScope(ABC):
@@ -77,8 +91,13 @@ class CancelRegistry(ABC):
     def on_cancel(self, task_id: str) -> CancelScope:
         """Return a scope that signals when cancellation is requested."""
 
+    @abstractmethod
     async def cleanup(self, task_id: str) -> None:
-        """Release resources for a completed task."""
+        """Release resources for a completed task.
+
+        Backends MUST implement this to avoid resource leaks
+        (e.g. Redis key cleanup).
+        """
 
 
 class Broker(ABC):

@@ -24,6 +24,7 @@ from a2a.types import (
 from agentserve.broker import Broker, CancelRegistry, OperationHandle
 from agentserve.event_bus.base import EventBus
 from agentserve.storage import Storage
+from agentserve.storage.base import TaskTerminalStateError
 from agentserve.worker.base import Worker
 from agentserve.worker.context_factory import ContextFactory
 
@@ -88,16 +89,33 @@ class WorkerAdapter:
             logger.exception("Unrecoverable error in operation handler")
 
     async def _handle_op_inner(self, handle: OperationHandle) -> None:
-        """Dispatch, ack on success, nack on failure."""
+        """Dispatch, ack on success, mark failed on error.
+
+        Instead of nacking (which re-enqueues and risks infinite retry
+        loops for poison messages), we ack the operation and mark the
+        task as failed so it reaches a terminal state.
+        """
         try:
             await self._dispatch(handle.operation)
             await handle.ack()
         except Exception:
+            logger.exception("Operation failed, marking task as failed")
             try:
-                await handle.nack()
+                await handle.ack()
+                op = handle.operation
+                params = getattr(op, "params", None)
+                msg = getattr(params, "message", None) if params else None
+                task_id = getattr(msg, "task_id", None) if msg else None
+                context_id = getattr(msg, "context_id", None) if msg else None
+                if task_id:
+                    await self._mark_failed(
+                        self._context_factory.emitter,
+                        task_id,
+                        context_id,
+                        "Worker failed to process task",
+                    )
             except Exception:
-                logger.exception("nack itself failed")
-            logger.exception("Operation failed, nacked")
+                logger.exception("Failed to mark task as failed after error")
 
     async def _dispatch(self, op: Any) -> None:
         """Route an operation to the appropriate handler."""
@@ -124,31 +142,47 @@ class WorkerAdapter:
             message, cancel_event, is_new_task=is_new_task
         )
 
-        await emitter.update_task(task_id, state=TaskState.working)
-        await ctx.send_status()
-
         try:
-            await self._user_worker.handle(ctx)
-            if not ctx.turn_ended:
-                await ctx.fail(
-                    "Worker returned without calling a lifecycle method "
-                    "(complete/fail/reject/respond/request_input/request_auth)"
-                )
-        except anyio.get_cancelled_exc_class():
-            await self._mark_canceled(emitter, task_id, context_id)
-        except Exception as exc:
-            logger.exception("Worker error for task %s", task_id)
-            await self._mark_failed(emitter, task_id, context_id, str(exc))
+            try:
+                await emitter.update_task(task_id, state=TaskState.working)
+            except TaskTerminalStateError:
+                # Task was already terminated (e.g., canceled before the
+                # worker picked it up).  Nothing to do — just clean up.
+                return
+
+            await ctx.send_status()
+
+            try:
+                await self._user_worker.handle(ctx)
+                if not ctx.turn_ended:
+                    await ctx.fail(
+                        "Worker returned without calling a lifecycle method "
+                        "(complete/fail/reject/respond/request_input/request_auth)"
+                    )
+            except anyio.get_cancelled_exc_class():
+                await self._mark_canceled(emitter, task_id, context_id)
+            except Exception as exc:
+                logger.exception("Worker error for task %s", task_id)
+                await self._mark_failed(emitter, task_id, context_id, str(exc))
         finally:
             await self._event_bus.cleanup(task_id)
             await self._cancel_registry.cleanup(task_id)
 
     @staticmethod
     async def _mark_canceled(emitter, task_id: str, context_id: str | None) -> None:
-        """Persist canceled state and emit a final status event."""
-        await emitter.update_task(task_id, state=TaskState.canceled)
+        """Persist canceled state (with reason) and emit a final status event."""
+        cancel_message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text="Task was canceled."))],
+            message_id=str(uuid.uuid4()),
+        )
+        await emitter.update_task(
+            task_id, state=TaskState.canceled, messages=[cancel_message]
+        )
         status = TaskStatus(
-            state=TaskState.canceled, timestamp=datetime.now(UTC).isoformat()
+            state=TaskState.canceled,
+            timestamp=datetime.now(UTC).isoformat(),
+            message=cancel_message,
         )
         await emitter.send_event(
             task_id,
@@ -165,16 +199,19 @@ class WorkerAdapter:
     async def _mark_failed(
         emitter, task_id: str, context_id: str | None, reason: str
     ) -> None:
-        """Persist failed state and emit a final status event with the error."""
-        await emitter.update_task(task_id, state=TaskState.failed)
+        """Persist failed state (with reason) and emit a final status event."""
+        error_message = Message(
+            role=Role.agent,
+            parts=[Part(TextPart(text=reason))],
+            message_id=str(uuid.uuid4()),
+        )
+        await emitter.update_task(
+            task_id, state=TaskState.failed, messages=[error_message]
+        )
         status = TaskStatus(
             state=TaskState.failed,
             timestamp=datetime.now(UTC).isoformat(),
-            message=Message(
-                role=Role.agent,
-                parts=[Part(TextPart(text=reason))],
-                message_id=str(uuid.uuid4()),
-            ),
+            message=error_message,
         )
         await emitter.send_event(
             task_id,

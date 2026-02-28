@@ -2,17 +2,55 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 
-from a2a.types import AgentCard, MessageSendParams, Task, TaskState
+from a2a.types import (
+    AgentCard,
+    Message,
+    MessageSendParams,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskState,
+    TaskStatusUpdateEvent,
+)
 from fastapi import APIRouter, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
-from agentserve.storage.base import ListTasksQuery, ListTasksResult
+from pydantic import BaseModel
+
+from agentserve.schema import DirectReply, StreamEvent
+from agentserve.storage.base import ListTasksQuery, TaskNotCancelableError, TaskNotFoundError
 from agentserve.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
+
+
+class SendMessageResponse(BaseModel):
+    """Spec-conformant response wrapper for message:send (§11.4)."""
+
+    task: Task | None = None
+    message: Message | None = None
+
+
+def _wrap_stream_event(event: StreamEvent) -> str:
+    """Wrap a stream event in the spec-conformant StreamResponse envelope."""
+    # DirectReply is a dataclass wrapping a Message — handle before model_dump.
+    if isinstance(event, DirectReply):
+        raw = event.message.model_dump(mode="json", by_alias=True, exclude_none=True)
+        return json.dumps({"message": raw})
+    raw = event.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if isinstance(event, Task):
+        return json.dumps({"task": raw})
+    if isinstance(event, TaskStatusUpdateEvent):
+        return json.dumps({"statusUpdate": raw})
+    if isinstance(event, TaskArtifactUpdateEvent):
+        return json.dumps({"artifactUpdate": raw})
+    if isinstance(event, Message):
+        return json.dumps({"message": raw})
+    return json.dumps(raw)
 
 
 def _get_tm(request: Request) -> TaskManager:
@@ -39,11 +77,16 @@ def build_a2a_router() -> APIRouter:
     router = APIRouter()
 
     @router.post("/v1/message:send")
-    async def message_send(request: Request, params: MessageSendParams) -> Task:
-        """Submit a message and return the task."""
+    async def message_send(
+        request: Request, params: MessageSendParams
+    ) -> SendMessageResponse:
+        """Submit a message and return the task wrapped in a SendMessageResponse."""
         params = _validate_ids(params)
         tm = _get_tm(request)
-        return await tm.send_message(params)
+        result = await tm.send_message(params)
+        if isinstance(result, Message):
+            return SendMessageResponse(message=result)
+        return SendMessageResponse(task=result)
 
     @router.post("/v1/message:stream")
     async def message_stream(
@@ -58,9 +101,9 @@ def build_a2a_router() -> APIRouter:
         async def sse_gen() -> AsyncIterator[str]:
             """Yield JSON-serialized events for the SSE response."""
             try:
-                yield first_event.model_dump_json(by_alias=True, exclude_none=True)
+                yield _wrap_stream_event(first_event)
                 async for ev in agen:
-                    yield ev.model_dump_json(by_alias=True, exclude_none=True)
+                    yield _wrap_stream_event(ev)
             except Exception:
                 logger.exception("SSE stream aborted")
                 return
@@ -92,7 +135,7 @@ def build_a2a_router() -> APIRouter:
         history_length: int | None = Query(None, alias="historyLength"),
         status_timestamp_after: str | None = Query(None, alias="statusTimestampAfter"),
         include_artifacts: bool = Query(False, alias="includeArtifacts"),
-    ) -> ListTasksResult:
+    ) -> JSONResponse:
         """List tasks with optional filters and pagination."""
         tm = _get_tm(request)
         query = ListTasksQuery(
@@ -104,7 +147,12 @@ def build_a2a_router() -> APIRouter:
             status_timestamp_after=status_timestamp_after,
             include_artifacts=include_artifacts,
         )
-        return await tm.list_tasks(query)
+        result = await tm.list_tasks(query)
+        return JSONResponse(
+            content=json.loads(
+                result.model_dump_json(by_alias=True, exclude_none=True)
+            )
+        )
 
     @router.post("/v1/tasks/{task_id}:cancel")
     async def tasks_cancel(
@@ -113,12 +161,16 @@ def build_a2a_router() -> APIRouter:
     ) -> Task:
         """Cancel a task by ID."""
         tm = _get_tm(request)
-        t = await tm.cancel_task(task_id)
-        if not t:
+        try:
+            return await tm.cancel_task(task_id)
+        except TaskNotFoundError:
             raise HTTPException(
                 status_code=404, detail={"code": -32001, "message": "Task not found"}
             )
-        return t
+        except TaskNotCancelableError:
+            raise HTTPException(
+                status_code=409, detail={"code": -32002, "message": "Task is not cancelable"}
+            )
 
     @router.post("/v1/tasks/{task_id}:subscribe")
     async def tasks_subscribe(
@@ -132,9 +184,9 @@ def build_a2a_router() -> APIRouter:
         async def sse_gen() -> AsyncIterator[str]:
             """Yield JSON-serialized events for the SSE response."""
             try:
-                yield first_event.model_dump_json(by_alias=True, exclude_none=True)
+                yield _wrap_stream_event(first_event)
                 async for ev in agen:
-                    yield ev.model_dump_json(by_alias=True, exclude_none=True)
+                    yield _wrap_stream_event(ev)
             except Exception:
                 logger.exception("SSE subscribe stream aborted")
                 return
