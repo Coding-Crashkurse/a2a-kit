@@ -2,6 +2,7 @@
 
 from agentserve.storage.base import (
     ArtifactWrite,
+    ConcurrencyError,
     ContextMismatchError,
     ListTasksQuery,
     ListTasksResult,
@@ -16,6 +17,7 @@ from agentserve.storage.memory import InMemoryStorage
 
 __all__ = [
     "ArtifactWrite",
+    "ConcurrencyError",
     "ContextMismatchError",
     "ListTasksQuery",
     "ListTasksResult",

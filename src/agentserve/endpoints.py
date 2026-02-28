@@ -8,51 +8,35 @@ from collections.abc import AsyncIterator
 
 from a2a.types import (
     AgentCard,
-    Message,
     MessageSendParams,
     Task,
-    TaskArtifactUpdateEvent,
     TaskState,
-    TaskStatusUpdateEvent,
 )
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
-from pydantic import BaseModel
-
 from agentserve.schema import DirectReply, StreamEvent
 from agentserve.storage.base import ListTasksQuery, TaskNotCancelableError, TaskNotFoundError
 from agentserve.task_manager import TaskManager
 
-SUPPORTED_A2A_VERSION = "0.3"
+SUPPORTED_A2A_VERSION = "0.3.0"
 
 logger = logging.getLogger(__name__)
 
 
-class SendMessageResponse(BaseModel):
-    """Spec-conformant response wrapper for message:send (§11.4)."""
-
-    task: Task | None = None
-    message: Message | None = None
-
-
 def _wrap_stream_event(event: StreamEvent) -> str:
-    """Wrap a stream event in the spec-conformant StreamResponse envelope."""
-    # DirectReply is a dataclass wrapping a Message — handle before model_dump.
+    """Serialize a stream event for SSE (HTTP+JSON/REST transport).
+
+    REST transport uses the object's ``kind`` field as discriminator.
+    No wrapper envelope needed (unlike JSON-RPC transport).
+    """
     if isinstance(event, DirectReply):
-        raw = event.message.model_dump(mode="json", by_alias=True, exclude_none=True)
-        return json.dumps({"message": raw})
-    raw = event.model_dump(mode="json", by_alias=True, exclude_none=True)
-    if isinstance(event, Task):
-        return json.dumps({"task": raw})
-    if isinstance(event, TaskStatusUpdateEvent):
-        return json.dumps({"statusUpdate": raw})
-    if isinstance(event, TaskArtifactUpdateEvent):
-        return json.dumps({"artifactUpdate": raw})
-    if isinstance(event, Message):
-        return json.dumps({"message": raw})
-    return json.dumps(raw)
+        return event.message.model_dump_json(by_alias=True, exclude_none=True)
+    
+    # FIX: Wir haben exclude={"final"} entfernt, damit die A2A-Clients wissen, 
+    # wann der Stream fertig ist und die Verbindung schließen können!
+    return event.model_dump_json(by_alias=True, exclude_none=True)
 
 
 def _check_a2a_version(
@@ -120,14 +104,23 @@ def build_a2a_router() -> APIRouter:
     @router.post("/v1/message:send")
     async def message_send(
         request: Request, params: MessageSendParams
-    ) -> SendMessageResponse:
-        """Submit a message and return the task wrapped in a SendMessageResponse."""
+    ) -> JSONResponse:
+        """Submit a message and return the task or message directly.
+
+        Returns a JSON-serialized ``Task`` object in the normal case.
+        When the worker used ``reply_directly()``, returns a JSON-serialized
+        ``Message`` instead (A2A spec §3.1.1).  Both are wrapped in a
+        ``JSONResponse`` — callers should inspect the ``kind`` field
+        (present on Task, absent on Message) to discriminate.
+        """
         params = _validate_ids(params)
         tm = _get_tm(request)
         result = await tm.send_message(params)
-        if isinstance(result, Message):
-            return SendMessageResponse(message=result)
-        return SendMessageResponse(task=result)
+        return JSONResponse(
+            content=json.loads(
+                result.model_dump_json(by_alias=True, exclude_none=True)
+            )
+        )
 
     @router.post("/v1/message:stream")
     async def message_stream(
@@ -160,7 +153,7 @@ def build_a2a_router() -> APIRouter:
     async def tasks_get(
         request: Request,
         task_id: str = Path(),
-        history_length: int | None = None,
+        history_length: int | None = Query(None, alias="historyLength"),
     ) -> Task:
         """Get a single task by ID."""
         tm = _get_tm(request)

@@ -10,7 +10,7 @@ from typing import Any, Generic, Self
 
 from typing_extensions import TypeVar
 
-from a2a.types import Artifact, Message, Role, Task, TaskState
+from a2a.types import Artifact, Message, Task, TaskState
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,10 @@ class ContextMismatchError(Exception):
     """Raised when message contextId doesn't match the task's contextId."""
 
 
+class ConcurrencyError(Exception):
+    """Raised when expected_version doesn't match stored version."""
+
+
 class ListTasksQuery(BaseModel):
     """Filter and pagination parameters for listing tasks."""
 
@@ -85,13 +89,6 @@ class ArtifactWrite:
 
     artifact: Artifact
     append: bool = False
-
-
-def _is_agent_role(role: str | Role | None) -> bool:
-    """Check whether a role value represents the agent role."""
-    if role is None:
-        return False
-    return role == "agent" or getattr(role, "value", None) == "agent"
 
 
 class Storage(ABC, Generic[ContextT]):
@@ -133,14 +130,37 @@ class Storage(ABC, Generic[ContextT]):
     async def list_tasks(self, query: ListTasksQuery) -> ListTasksResult:
         """Return filtered and paginated tasks.
 
-        Optional — backends that don't support listing may leave this
-        as the default ``NotImplementedError``.
+        Default implementation returns empty results.  Override in
+        backends that support listing.
         """
-        raise NotImplementedError
+        return ListTasksResult()
 
     @abstractmethod
-    async def create_task(self, context_id: str, message: Message) -> Task:
-        """Create a brand-new task from an initial message."""
+    async def create_task(
+        self,
+        context_id: str,
+        message: Message,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Task:
+        """Create a brand-new task from an initial message.
+
+        If ``idempotency_key`` is provided and a task with the same
+        key **and** ``context_id`` already exists, return the existing
+        task instead of creating a duplicate.  The key is scoped per
+        context to avoid a global unique index on large tables.
+
+        **Atomicity requirement:** DB backends MUST implement idempotency
+        as an atomic operation. The recommended pattern is a UNIQUE
+        constraint on ``(context_id, idempotency_key)`` combined with
+        ``INSERT ... ON CONFLICT DO NOTHING RETURNING`` (PostgreSQL)
+        or equivalent. A SELECT-then-INSERT pattern is NOT sufficient
+        because it has a TOCTOU race under concurrent requests.
+
+        InMemoryStorage uses an O(N) scan which is acceptable for
+        development but MUST NOT be used as a template for production
+        backends.
+        """
 
     @abstractmethod
     async def update_task(
@@ -151,12 +171,18 @@ class Storage(ABC, Generic[ContextT]):
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
-    ) -> Task:
+        expected_version: int | None = None,
+    ) -> int | None:
         """Persist state change, artifacts, and messages atomically.
 
         Pure CRUD — no business-logic validation.  All precondition
         checks (terminal guard, role enforcement, context mismatch)
         are handled by :class:`TaskManager` before this method is called.
+
+        **Message binding contract:** All ``Message`` objects in
+        ``messages`` MUST have ``task_id`` and ``context_id`` set by
+        the caller before this method is called.  Storage backends
+        MUST NOT be responsible for filling these fields.
 
         When ``state`` is ``None`` the current state MUST be preserved
         (keep-current semantics) — useful for pure artifact or message
@@ -169,13 +195,29 @@ class Storage(ABC, Generic[ContextT]):
         When ``task_metadata`` is provided, its key-value pairs are
         merged into the task's ``metadata`` dict.
 
+        When ``expected_version`` is provided and doesn't match the
+        stored version, raise a :class:`ConcurrencyError`.  InMemory
+        ignores this parameter.  DB backends should implement this as
+        ``UPDATE ... WHERE id = ? AND version = ?``.
+
+        **Terminal-state guard:** Implementations MUST reject state
+        transitions on tasks that are already in a terminal state
+        (completed, canceled, failed, rejected) by raising
+        :class:`TaskTerminalStateError`.  This prevents concurrent
+        writers from corrupting terminal states (e.g. force-cancel
+        and worker completing simultaneously).  Pure message or
+        artifact appends without a state transition (``state=None``)
+        are not affected by this guard.
+
         Implementations MUST ensure that all changes are applied as a
         single atomic operation.  If any part fails, no changes must be
         visible.  For database backends this means a single transaction.
 
-        **Return value:** The returned Task object is NOT guaranteed to
-        contain full history or artifacts.  Use ``load_task()`` for
-        reading back complete task state.
+        **Return value:** The new version number after the write.
+        InMemory returns ``None`` (no versioning).  DB backends
+        return the incremented version so callers can use it for
+        subsequent optimistic-concurrency writes.  Use ``load_task()``
+        for reading back complete task state.
         """
 
     async def delete_task(self, task_id: str) -> bool:

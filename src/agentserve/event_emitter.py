@@ -19,6 +19,15 @@ class EventEmitter(ABC):
     """Thin interface that TaskContext uses to persist state and broadcast events.
 
     This keeps TaskContext unaware of EventBus and Storage as separate concepts.
+
+    **Call order contract for callers (TaskContextImpl):**
+
+    1. ``update_task()`` — Storage write (authoritative, must succeed)
+    2. ``send_event()`` — EventBus publish (best-effort, may fail)
+
+    If step 2 fails, the state is still correct in Storage. Clients
+    polling via GET will see the right state. SSE subscribers may miss
+    intermediate events but will always see the final status event.
     """
 
     @abstractmethod
@@ -30,11 +39,16 @@ class EventEmitter(ABC):
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
-    ) -> None:
+        expected_version: int | None = None,
+    ) -> int | None:
         """Persist a task state change (and optional artifacts/messages).
 
         When ``state`` is ``None`` the current state is preserved.
-        Return value is intentionally void — no caller uses it.
+        When ``expected_version`` is provided, it is passed through to
+        Storage for optimistic concurrency control.
+
+        Returns the new version from Storage (``int`` for DB backends,
+        ``None`` for InMemory).
         """
 
     @abstractmethod
@@ -61,14 +75,16 @@ class DefaultEventEmitter(EventEmitter):
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
-    ) -> None:
+        expected_version: int | None = None,
+    ) -> int | None:
         """Persist a task state change via storage."""
-        await self._storage.update_task(
+        return await self._storage.update_task(
             task_id,
             state=state,
             artifacts=artifacts,
             messages=messages,
             task_metadata=task_metadata,
+            expected_version=expected_version,
         )
 
     async def send_event(self, task_id: str, event: StreamEvent) -> None:

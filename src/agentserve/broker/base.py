@@ -97,11 +97,11 @@ class CancelRegistry(ABC):
 
         MUST be idempotent. Multiple calls with the same task_id
         MUST NOT raise and MUST NOT affect resources for other tasks.
-        Called exactly once per task lifecycle by WorkerAdapter.
 
-        NO OTHER COMPONENT may call this method. TaskManager,
-        Endpoints, and ContextFactory MUST NOT call cleanup.
-        WorkerAdapter is the sole owner of cleanup lifecycle.
+        Called by WorkerAdapter at the end of normal task processing
+        and by TaskManager._force_cancel_after when the worker does
+        not cooperate within the cancel timeout.  No other component
+        may call this method.
 
         Backends MUST implement this to avoid resource leaks
         (e.g. Redis key cleanup).
@@ -117,6 +117,15 @@ class Broker(ABC):
     ) -> None: ...
 
     @abstractmethod
+    async def shutdown(self) -> None:
+        """Signal the broker to stop receiving operations.
+
+        ``receive_task_operations()`` should terminate gracefully after
+        this is called.  Implementations should close connections and
+        release resources cleanly.
+        """
+
+    @abstractmethod
     async def __aenter__(self) -> Self: ...
 
     @abstractmethod
@@ -128,7 +137,7 @@ class Broker(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def receive_task_operations(self) -> AsyncGenerator[OperationHandle, None]:
+    def receive_task_operations(self) -> AsyncIterator[OperationHandle]:
         """Yield task operations from the queue.
 
         This is an async generator — implementations yield OperationHandle
@@ -141,4 +150,20 @@ class Broker(ABC):
         The generator runs indefinitely until the broker is shut down.
         Connection lifecycle (connect, channel setup, teardown) is managed
         by the Broker's ``__aenter__``/``__aexit__``.
+
+        **Task-level serialization:** Implementations for distributed
+        deployments MUST ensure that at most one operation per ``task_id``
+        is in processing at any time. Mechanisms:
+
+        - RabbitMQ: Consistent Hash Exchange on task_id → single consumer
+          per partition
+        - Redis Streams: Consumer Group with XREADGROUP, claim-tracking
+          per task_id
+        - SQS: Message Group ID = task_id (FIFO Queue)
+
+        InMemoryBroker is exempt from this requirement (single-process).
+
+        If a backend uses at-least-once delivery, it MUST ensure that
+        re-deliveries only occur after the previous delivery for the same
+        ``task_id`` has been acknowledged (ack) or rejected (nack).
         """

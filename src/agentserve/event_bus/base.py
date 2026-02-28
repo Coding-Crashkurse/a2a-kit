@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Self
+from typing import AsyncContextManager, Self
 
 from agentserve.schema import StreamEvent
 
@@ -26,10 +25,9 @@ class EventBus(ABC):
         """
 
     @abstractmethod
-    @asynccontextmanager
-    async def subscribe(
+    def subscribe(
         self, task_id: str, *, after_event_id: str | None = None
-    ) -> AsyncIterator[AsyncIterator[StreamEvent]]:
+    ) -> AsyncContextManager[AsyncIterator[StreamEvent]]:
         """Subscribe to stream events for a task.
 
         MUST be used as an async context manager:
@@ -49,18 +47,19 @@ class EventBus(ABC):
         Implementations MUST yield events in the order they were
         published (per A2A spec §3.5.2).
         """
-        yield  # pragma: no cover
+        ...
 
+    @abstractmethod
     async def cleanup(self, task_id: str) -> None:
         """Release subscriber resources for a completed task.
 
         MUST be idempotent. Multiple calls with the same task_id
         MUST NOT raise and MUST NOT affect resources for other tasks.
-        Called exactly once per task lifecycle by WorkerAdapter.
 
-        NO OTHER COMPONENT may call this method. TaskManager,
-        Endpoints, and ContextFactory MUST NOT call cleanup.
-        WorkerAdapter is the sole owner of cleanup lifecycle.
+        Called by WorkerAdapter at the end of normal task processing
+        and by TaskManager._force_cancel_after when the worker does
+        not cooperate within the cancel timeout.  No other component
+        may call this method.
 
         Backends MUST implement this to avoid resource leaks
         (e.g. Redis UNSUBSCRIBE, key cleanup).

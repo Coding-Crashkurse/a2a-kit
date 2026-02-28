@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from typing import Any, Self
 
 import anyio
@@ -60,16 +61,26 @@ class InMemoryCancelRegistry(CancelRegistry):
         self._cancel_events.pop(task_id, None)
 
 
+@dataclass
+class _EnqueuedOp:
+    """Internal wrapper carrying attempt count through the queue."""
+
+    op: TaskOperation
+    attempt: int = 1
+
+
 class InMemoryOperationHandle(OperationHandle):
     """In-memory handle where ack is a no-op."""
 
     def __init__(
         self,
         op: TaskOperation,
-        requeue: Callable[[TaskOperation], Coroutine[Any, Any, None]],
+        requeue: Callable[[_EnqueuedOp], Coroutine[Any, Any, None]],
+        attempt: int = 1,
     ) -> None:
         self._op = op
         self._requeue = requeue
+        self._attempt = attempt
 
     @property
     def operation(self) -> TaskOperation:
@@ -78,15 +89,15 @@ class InMemoryOperationHandle(OperationHandle):
 
     @property
     def attempt(self) -> int:
-        """Always 1 for in-memory (no retry tracking)."""
-        return 1
+        """Delivery attempt number (1-based, incremented on nack)."""
+        return self._attempt
 
     async def ack(self) -> None:
         """Acknowledge successful processing (no-op for in-memory)."""
 
     async def nack(self, *, delay_seconds: float = 0) -> None:
-        """Re-enqueue immediately (delay_seconds is ignored)."""
-        await self._requeue(self._op)
+        """Re-enqueue with incremented attempt (delay_seconds is ignored)."""
+        await self._requeue(_EnqueuedOp(self._op, self._attempt + 1))
 
 
 class InMemoryBroker(Broker):
@@ -96,15 +107,15 @@ class InMemoryBroker(Broker):
         """Initialize buffer size and internal state."""
         self._ops_buffer = ops_buffer
         self._aexit_stack: AsyncExitStack | None = None
-        self._ops_write: MemoryObjectSendStream[TaskOperation] | None = None
-        self._ops_read: MemoryObjectReceiveStream[TaskOperation] | None = None
+        self._ops_write: MemoryObjectSendStream[_EnqueuedOp] | None = None
+        self._ops_read: MemoryObjectReceiveStream[_EnqueuedOp] | None = None
 
     async def __aenter__(self) -> Self:
         """Create memory streams."""
         self._aexit_stack = AsyncExitStack()
         await self._aexit_stack.__aenter__()
         self._ops_write, self._ops_read = anyio.create_memory_object_stream[
-            TaskOperation
+            _EnqueuedOp
         ](max_buffer_size=self._ops_buffer)
         await self._aexit_stack.enter_async_context(self._ops_write)
         await self._aexit_stack.enter_async_context(self._ops_read)
@@ -120,15 +131,22 @@ class InMemoryBroker(Broker):
     ) -> None:
         """Enqueue a run-task operation."""
         await self._ops_write.send(
-            _RunTask(operation="run", params=params, is_new_task=is_new_task)
+            _EnqueuedOp(_RunTask(operation="run", params=params, is_new_task=is_new_task))
         )
 
-    async def receive_task_operations(self) -> AsyncGenerator[OperationHandle, None]:
+    async def shutdown(self) -> None:
+        """Signal the broker to stop receiving operations."""
+        if self._ops_write:
+            await self._ops_write.aclose()
+
+    async def receive_task_operations(self) -> AsyncIterator[OperationHandle]:
         """Yield operation handles from the internal queue."""
         async with self._ops_read:
-            async for op in self._ops_read:
-                yield InMemoryOperationHandle(op, self._requeue)
+            async for envelope in self._ops_read:
+                yield InMemoryOperationHandle(
+                    envelope.op, self._requeue, envelope.attempt
+                )
 
-    async def _requeue(self, op: TaskOperation) -> None:
+    async def _requeue(self, envelope: _EnqueuedOp) -> None:
         """Re-enqueue an operation after nack."""
-        await self._ops_write.send(op)
+        await self._ops_write.send(envelope)

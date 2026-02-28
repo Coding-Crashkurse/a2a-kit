@@ -8,8 +8,7 @@ from a2a.types import Artifact as A2AArtifact
 from a2a.types import Message, Part, TextPart
 
 from agentserve.broker.base import CancelScope
-from agentserve.event_bus.base import EventBus
-from agentserve.event_emitter import DefaultEventEmitter, EventEmitter
+from agentserve.event_emitter import EventEmitter
 from agentserve.storage import Storage
 from agentserve.worker.base import (
     HistoryMessage,
@@ -21,15 +20,9 @@ from agentserve.worker.base import (
 class ContextFactory:
     """Translates an A2A Message into a clean TaskContextImpl."""
 
-    def __init__(self, event_bus: EventBus, storage: Storage) -> None:
-        self._event_bus = event_bus
+    def __init__(self, emitter: EventEmitter, storage: Storage) -> None:
+        self._emitter = emitter
         self._storage = storage
-        self._emitter = DefaultEventEmitter(event_bus, storage)
-
-    @property
-    def emitter(self) -> EventEmitter:
-        """Return the shared EventEmitter instance."""
-        return self._emitter
 
     async def build(
         self,
@@ -52,6 +45,9 @@ class ContextFactory:
                 )
                 previous_artifacts = self._convert_artifacts(task.artifacts or [])
 
+        # initial_version starts as None; the first _versioned_update call
+        # (typically the working-state transition in WorkerAdapter) will
+        # capture the version returned by Storage and track it from there.
         return TaskContextImpl(
             task_id=message.task_id,
             context_id=message.context_id,

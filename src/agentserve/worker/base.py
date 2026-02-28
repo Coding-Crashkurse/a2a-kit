@@ -29,7 +29,13 @@ from a2a.types import (
 from agentserve.broker.base import CancelScope
 from agentserve.event_emitter import EventEmitter
 from agentserve.schema import DIRECT_REPLY_KEY, DirectReply
-from agentserve.storage.base import ArtifactWrite, Storage
+from agentserve.storage.base import (
+    TERMINAL_STATES,
+    ArtifactWrite,
+    ConcurrencyError,
+    Storage,
+    TaskTerminalStateError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +339,7 @@ class TaskContextImpl(TaskContext):
         storage: Storage,
         history: list[HistoryMessage] | None = None,
         previous_artifacts: list[PreviousArtifact] | None = None,
+        initial_version: int | None = None,
     ) -> None:
         """Initialize the task context.
 
@@ -340,6 +347,9 @@ class TaskContextImpl(TaskContext):
             emitter: EventEmitter for state changes and event broadcasting.
             cancel_event: Scope for cooperative cancellation checks.
             storage: Storage for context load/update operations.
+            initial_version: Optimistic concurrency version from storage.
+                DB backends use this for ``UPDATE ... WHERE version = ?``.
+                InMemory ignores this parameter.
         """
         self.task_id = task_id
         self.context_id = context_id
@@ -355,6 +365,47 @@ class TaskContextImpl(TaskContext):
             previous_artifacts if previous_artifacts is not None else []
         )
         self._turn_ended: bool = False
+        self._version: int | None = initial_version
+
+    def _make_agent_message(
+        self, parts: list[Part], *, metadata: dict | None = None
+    ) -> Message:
+        """Create an agent Message pre-filled with task_id and context_id."""
+        return Message(
+            role=Role.agent,
+            parts=parts,
+            message_id=str(uuid.uuid4()),
+            task_id=self.task_id,
+            context_id=self.context_id,
+            metadata=metadata if metadata is not None else self.metadata,
+        )
+
+    async def _versioned_update(self, task_id: str, **kwargs: Any) -> None:
+        """Call emitter.update_task with optimistic concurrency version.
+
+        Passes ``expected_version`` and updates ``self._version`` from
+        the returned new version so subsequent writes stay in sync.
+
+        On ``ConcurrencyError`` (version mismatch from a concurrent
+        writer), re-loads the task:
+        - If terminal → raises ``TaskTerminalStateError`` so the
+          caller stops processing (e.g. force-cancel won the race).
+        - If non-terminal → retries once without version constraint.
+        """
+        try:
+            new_version = await self._emitter.update_task(
+                task_id, expected_version=self._version, **kwargs
+            )
+            self._version = new_version
+        except ConcurrencyError:
+            task = await self._storage.load_task(task_id)
+            if task is None or task.status.state in TERMINAL_STATES:
+                raise TaskTerminalStateError(
+                    f"Task {task_id} reached terminal state during update"
+                )
+            # Non-terminal version mismatch: retry once without OCC.
+            new_version = await self._emitter.update_task(task_id, **kwargs)
+            self._version = new_version
 
     @property
     def is_cancelled(self) -> bool:
@@ -398,7 +449,7 @@ class TaskContextImpl(TaskContext):
             artifact = Artifact(artifact_id=artifact_id, parts=final_parts)
             artifact_writes = [ArtifactWrite(artifact)]
 
-        await self._emitter.update_task(
+        await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
             artifacts=artifact_writes,
@@ -431,7 +482,7 @@ class TaskContextImpl(TaskContext):
             metadata={"media_type": "application/json"},
         )
 
-        await self._emitter.update_task(
+        await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
             artifacts=[ArtifactWrite(artifact)],
@@ -454,79 +505,58 @@ class TaskContextImpl(TaskContext):
 
     async def fail(self, reason: str) -> None:
         """Mark the task as failed with an error reason."""
-        fail_message = Message(
-            role=Role.agent,
-            parts=[Part(TextPart(text=reason))],
-            message_id=str(uuid.uuid4()),
-            metadata=self.metadata,
-        )
-        await self._emitter.update_task(
+        fail_message = self._make_agent_message([Part(TextPart(text=reason))])
+        await self._versioned_update(
             self.task_id, state=TaskState.failed, messages=[fail_message]
         )
-        await self._emit_status(TaskState.failed, message_text=reason)
+        await self._emit_status(TaskState.failed, message=fail_message)
         self._turn_ended = True
 
     async def reject(self, reason: str | None = None) -> None:
         """Reject the task — agent decides not to perform it."""
         reject_text = reason or "Task rejected."
-        reject_message = Message(
-            role=Role.agent,
-            parts=[Part(TextPart(text=reject_text))],
-            message_id=str(uuid.uuid4()),
-            metadata=self.metadata,
+        reject_message = self._make_agent_message(
+            [Part(TextPart(text=reject_text))]
         )
-        await self._emitter.update_task(
+        await self._versioned_update(
             self.task_id, state=TaskState.rejected, messages=[reject_message]
         )
-        await self._emit_status(TaskState.rejected, message_text=reason)
+        await self._emit_status(TaskState.rejected, message=reject_message)
         self._turn_ended = True
 
     async def request_input(self, question: str) -> None:
         """Transition to input-required state."""
-        input_message = Message(
-            role=Role.agent,
-            parts=[Part(TextPart(text=question))],
-            message_id=str(uuid.uuid4()),
-            metadata=self.metadata,
+        input_message = self._make_agent_message(
+            [Part(TextPart(text=question))]
         )
-        await self._emitter.update_task(
+        await self._versioned_update(
             self.task_id, state=TaskState.input_required, messages=[input_message]
         )
-        await self._emit_status(TaskState.input_required, message_text=question)
+        await self._emit_status(TaskState.input_required, message=input_message)
         self._turn_ended = True
 
     async def request_auth(self, details: str | None = None) -> None:
         """Transition to auth-required state for secondary credentials."""
         auth_text = details or "Authentication required."
-        auth_message = Message(
-            role=Role.agent,
-            parts=[Part(TextPart(text=auth_text))],
-            message_id=str(uuid.uuid4()),
-            metadata=self.metadata,
+        auth_message = self._make_agent_message(
+            [Part(TextPart(text=auth_text))]
         )
-        await self._emitter.update_task(
+        await self._versioned_update(
             self.task_id, state=TaskState.auth_required, messages=[auth_message]
         )
-        await self._emit_status(TaskState.auth_required, message_text=details)
+        await self._emit_status(TaskState.auth_required, message=auth_message)
         self._turn_ended = True
 
     async def respond(self, text: str | None = None) -> None:
         """Complete the task with a status message (no artifact created)."""
         msg_parts = [Part(TextPart(text=text))] if text else []
-        message = Message(
-            role=Role.agent,
-            parts=msg_parts,
-            message_id=str(uuid.uuid4()),
-            metadata=self.metadata,
-        )
-        await self._emitter.update_task(
+        respond_message = self._make_agent_message(msg_parts)
+        await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
-            messages=[message],
+            messages=[respond_message],
         )
-        # No separate message event — the message is persisted in Storage.
-        # The completed status is broadcast via _emit_status below.
-        await self._emit_status(TaskState.completed, message_text=text)
+        await self._emit_status(TaskState.completed, message=respond_message)
         self._turn_ended = True
 
     async def reply_directly(self, text: str) -> None:
@@ -542,20 +572,15 @@ class TaskContextImpl(TaskContext):
         receives a :class:`DirectReply` wrapper so subscribers can
         distinguish this from a normal agent message.
         """
-        message = Message(
-            role=Role.agent,
-            parts=[Part(TextPart(text=text))],
-            message_id=str(uuid.uuid4()),
-            metadata=self.metadata,
-        )
-        await self._emitter.update_task(
+        message = self._make_agent_message([Part(TextPart(text=text))])
+        await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
             messages=[message],
             task_metadata={DIRECT_REPLY_KEY: message.message_id},
         )
         await self._emitter.send_event(self.task_id, DirectReply(message=message))
-        await self._emit_status(TaskState.completed)
+        await self._emit_status(TaskState.completed, message=message)
         self._turn_ended = True
 
     async def send_status(self, message: str | None = None) -> None:
@@ -594,7 +619,7 @@ class TaskContextImpl(TaskContext):
             parts=parts,
             metadata=metadata or {},
         )
-        await self._emitter.update_task(
+        await self._versioned_update(
             self.task_id,
             artifacts=[ArtifactWrite(artifact, append=append)],
         )
@@ -648,6 +673,7 @@ class TaskContextImpl(TaskContext):
         self,
         state: TaskState,
         *,
+        message: Message | None = None,
         message_text: str | None = None,
         final: bool | None = None,
     ) -> None:
@@ -658,6 +684,11 @@ class TaskContextImpl(TaskContext):
         like ``auth_required`` and ``input_required`` set ``final=True``
         because the client must reconnect after these responses, even
         though the task itself is not terminal.
+
+        When ``message`` is provided, it is used directly (reusing the
+        persisted message for consistency between SSE and polling).
+        When only ``message_text`` is provided, a new ephemeral message
+        is created (appropriate for intermediate status updates).
         """
         if final is None:
             final = state in {
@@ -668,19 +699,22 @@ class TaskContextImpl(TaskContext):
                 TaskState.auth_required,
                 TaskState.input_required,
             }
+
+        status_message = message
+        if status_message is None and message_text:
+            status_message = Message(
+                role=Role.agent,
+                parts=[Part(TextPart(text=message_text))],
+                message_id=str(uuid.uuid4()),
+                task_id=self.task_id,
+                context_id=self.context_id,
+                metadata=self.metadata,
+            )
+
         status = TaskStatus(
             state=state,
             timestamp=datetime.now(UTC).isoformat(),
-            message=(
-                Message(
-                    role=Role.agent,
-                    parts=[Part(TextPart(text=message_text))],
-                    message_id=str(uuid.uuid4()),
-                    metadata=self.metadata,
-                )
-                if message_text
-                else None
-            ),
+            message=status_message,
         )
         await self._emitter.send_event(
             self.task_id,
@@ -692,6 +726,11 @@ class TaskContextImpl(TaskContext):
                 final=final,
             ),
         )
+
+    # Context operations bypass EventEmitter intentionally:
+    # - Context is per-user state, not task state
+    # - No event broadcasting needed for context changes
+    # - EventEmitter should not be extended for non-task concerns
 
     async def load_context(self) -> Any:
         """Load stored context for this task's context_id."""

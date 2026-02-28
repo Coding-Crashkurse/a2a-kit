@@ -10,12 +10,14 @@ from typing import Any
 from a2a.types import Artifact, Message, Task, TaskState, TaskStatus
 
 from agentserve.storage.base import (
+    TERMINAL_STATES,
     ArtifactWrite,
     ContextT,
     ListTasksQuery,
     ListTasksResult,
     Storage,
     TaskNotFoundError,
+    TaskTerminalStateError,
 )
 
 
@@ -26,12 +28,6 @@ class InMemoryStorage(Storage[ContextT]):
         """Initialize empty task and context stores."""
         self.tasks: dict[str, Task] = {}
         self.contexts: dict[str, ContextT] = {}
-
-    def _assign_messages(self, task: Task, messages: list[Message]) -> None:
-        """Bind messages to the task."""
-        for msg_obj in messages:
-            msg_obj.task_id = task.id
-            msg_obj.context_id = task.context_id
 
     @staticmethod
     def _trim_history(
@@ -110,8 +106,27 @@ class InMemoryStorage(Storage[ContextT]):
             total_size=total_size,
         )
 
-    async def create_task(self, context_id: str, message: Message) -> Task:
-        """Create a brand-new task from an initial message."""
+    async def create_task(
+        self,
+        context_id: str,
+        message: Message,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Task:
+        """Create a brand-new task from an initial message.
+
+        If ``idempotency_key`` is provided and a task with that key
+        already exists, return the existing task instead.
+        """
+        if idempotency_key:
+            for t in self.tasks.values():
+                if (
+                    t.context_id == context_id
+                    and t.metadata
+                    and t.metadata.get("_idempotency_key") == idempotency_key
+                ):
+                    return copy.deepcopy(t)
+
         task_id = str(uuid.uuid4())
         message.task_id = task_id
         message.context_id = context_id
@@ -125,6 +140,7 @@ class InMemoryStorage(Storage[ContextT]):
             ),
             history=[message],
             artifacts=[],
+            metadata={"_idempotency_key": idempotency_key} if idempotency_key else None,
         )
         self.tasks[task_id] = task
         return task
@@ -144,7 +160,8 @@ class InMemoryStorage(Storage[ContextT]):
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
-    ) -> Task:
+        expected_version: int | None = None,
+    ) -> int | None:
         """Atomically apply messages, artifacts, and state transition.
 
         Pure CRUD — no business-logic validation.  All precondition
@@ -152,11 +169,18 @@ class InMemoryStorage(Storage[ContextT]):
         are handled by :class:`TaskManager` before this method is called.
 
         When ``state`` is ``None`` the current state is preserved.
+        ``expected_version`` is ignored by InMemory (no versioning).
+        Returns ``None`` (InMemory has no version tracking).
         """
         task = self._get_task_or_raise(task_id)
 
+        if state is not None and task.status.state in TERMINAL_STATES:
+            raise TaskTerminalStateError(
+                f"Cannot transition terminal task {task_id} "
+                f"from {task.status.state.value} to {state.value}"
+            )
+
         if messages:
-            self._assign_messages(task, messages)
             task.history.extend(messages)
 
         if artifacts:
@@ -173,7 +197,7 @@ class InMemoryStorage(Storage[ContextT]):
                 state=state, timestamp=datetime.now(UTC).isoformat()
             )
 
-        return copy.deepcopy(task)
+        return None
 
     def _apply_artifact(
         self, task: Task, artifact: Artifact, *, append: bool

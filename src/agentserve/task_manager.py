@@ -7,23 +7,21 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any
 
 from a2a.types import (
     Message,
     MessageSendParams,
-    Part,
     Role,
     Task,
     TaskState,
-    TaskStatus,
     TaskStatusUpdateEvent,
-    TextPart,
 )
 
 from agentserve.broker import Broker, CancelRegistry
+from agentserve.cancel import cancel_task_in_storage
 from agentserve.event_bus.base import EventBus
+from agentserve.event_emitter import DefaultEventEmitter
 from agentserve.schema import DIRECT_REPLY_KEY, DirectReply, StreamEvent
 from agentserve.storage import Storage
 from agentserve.storage.base import (
@@ -36,10 +34,16 @@ from agentserve.storage.base import (
     TaskNotFoundError,
     TaskTerminalStateError,
     UnsupportedOperationError,
-    _is_agent_role,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_agent_role(role: str | Role | None) -> bool:
+    """Check whether a role value represents the agent role."""
+    if role is None:
+        return False
+    return role == "agent" or getattr(role, "value", None) == "agent"
 
 
 def _find_direct_reply(task: Task) -> Message | None:
@@ -63,7 +67,13 @@ def _find_direct_reply(task: Task) -> Message | None:
 
 @dataclass
 class TaskManager:
-    """High-level API for submitting, streaming, and managing tasks."""
+    """High-level API for submitting, streaming, and managing tasks.
+
+    Knows: Broker, Storage, EventBus, CancelRegistry.
+    Also creates a ``DefaultEventEmitter`` locally in
+    ``_force_cancel_after`` to ensure the cancel write path goes
+    through the same Storage+EventBus pipeline as the worker side.
+    """
 
     broker: Broker
     storage: Storage
@@ -83,49 +93,64 @@ class TaskManager:
         For new tasks (no ``message.task_id``): delegates to
         ``storage.create_task``.
 
-        For follow-ups (``message.task_id`` set):
-        - Raises ``TaskNotFoundError`` if the task doesn't exist.
-        - Raises ``TaskTerminalStateError`` if the task is terminal.
-        - Raises ``ContextMismatchError`` if context IDs don't match.
-        - Raises ``TaskNotAcceptingMessagesError`` if a non-agent message
-          is sent to a task not in ``input_required``.
-        - Transitions ``input_required → submitted`` automatically.
+        For follow-ups (``message.task_id`` set): loads the task,
+        validates preconditions, computes the state transition, and
+        persists the message via ``storage.update_task``.
         """
         if not message.task_id:
-            return await self.storage.create_task(context_id, message)
+            return await self.storage.create_task(
+                context_id, message, idempotency_key=message.message_id
+            )
 
+        task = await self._load_and_validate(message)
+        # Bind message to task before persisting (message binding contract).
+        message.context_id = message.context_id or task.context_id
+        new_state = self._compute_state_transition(task)
+        await self.storage.update_task(
+            task.id, state=new_state, messages=[message]
+        )
+        # Re-load to return the updated Task object.
+        updated = await self.storage.load_task(task.id)
+        assert updated is not None, f"Task {task.id} vanished after update"
+        return updated
+
+    async def _load_and_validate(self, message: Message) -> Task:
+        """Load task and enforce all preconditions.
+
+        Raises:
+            TaskNotFoundError: If the task doesn't exist.
+            TaskTerminalStateError: If the task is in a terminal state.
+            ContextMismatchError: If context IDs don't match.
+            TaskNotAcceptingMessagesError: If a non-agent message is sent
+                to a task not in ``input_required``.
+        """
         task = await self.storage.load_task(message.task_id)
         if task is None:
             raise TaskNotFoundError(f"Task {message.task_id} not found")
 
         current = task.status.state
 
-        # Terminal guard
         if current in TERMINAL_STATES:
             raise TaskTerminalStateError("task is terminal")
 
-        # Context mismatch
         if message.context_id and task.context_id != message.context_id:
             raise ContextMismatchError(
                 f"contextId {message.context_id!r} does not match "
                 f"task {message.task_id!r} contextId {task.context_id!r}"
             )
 
-        # Role enforcement: only agent messages allowed outside input_required
         if current != TaskState.input_required:
-            if not all(
-                _is_agent_role(getattr(m, "role", None)) for m in [message]
-            ):
+            if not _is_agent_role(getattr(message, "role", None)):
                 raise TaskNotAcceptingMessagesError(current)
 
-        # Auto-transition input_required → submitted
-        new_state: TaskState | None = None
-        if current == TaskState.input_required:
-            new_state = TaskState.submitted
+        return task
 
-        return await self.storage.update_task(
-            task.id, state=new_state, messages=[message]
-        )
+    @staticmethod
+    def _compute_state_transition(task: Task) -> TaskState | None:
+        """Determine the new state based on current task state."""
+        if task.status.state == TaskState.input_required:
+            return TaskState.submitted
+        return None
 
     async def send_message(self, params: MessageSendParams) -> Task | Message:
         """Submit a task and optionally block until completion.
@@ -196,6 +221,15 @@ class TaskManager:
         is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
         task = await self._submit_task(context_id, msg)
+
+        history_len = getattr(
+            getattr(params, "configuration", None), "history_length", None
+        )
+        if history_len is not None:
+            trimmed = await self.storage.load_task(task.id, history_length=history_len)
+            if trimmed is not None:
+                task = trimmed
+
         yield task
 
         params.message.context_id = context_id
@@ -249,7 +283,17 @@ class TaskManager:
         If the worker does not transition to ``canceled`` within
         ``cancel_force_timeout_s`` seconds, a background task will
         force the state transition to prevent tasks from being stuck
-        in ``working`` forever.
+        forever.
+
+        Cancel always goes through the CancelRegistry — there is no
+        instant-cancel path for ``submitted`` tasks.  This avoids a
+        race condition where both the TaskManager and the WorkerAdapter
+        could write to the same task concurrently (the worker may
+        dequeue the task between load_task and the state write).
+
+        The worker checks ``is_cancelled`` before transitioning to
+        ``working``, so submitted tasks are canceled promptly when
+        dequeued.
 
         Raises:
             TaskNotFoundError: If the task does not exist.
@@ -260,7 +304,6 @@ class TaskManager:
         if task is None:
             raise TaskNotFoundError(f"Task {task_id} not found")
 
-        # Already terminal — spec requires an error, not silent success
         if task.status.state in TERMINAL_STATES:
             raise TaskNotCancelableError(
                 f"Task {task_id} is in terminal state {task.status.state.value}"
@@ -268,45 +311,17 @@ class TaskManager:
 
         await self.cancel_registry.request_cancel(task_id)
 
-        # Instant cancel for tasks not yet picked up by the worker.
-        if task.status.state == TaskState.submitted:
-            cancel_message = Message(
-                role=Role.agent,
-                parts=[Part(TextPart(text="Task was canceled."))],
-                message_id=str(uuid.uuid4()),
-            )
-            await self.storage.update_task(
-                task_id, state=TaskState.canceled, messages=[cancel_message]
-            )
-            status = TaskStatus(
-                state=TaskState.canceled,
-                timestamp=datetime.now(UTC).isoformat(),
-                message=cancel_message,
-            )
-            await self.event_bus.publish(
-                task_id,
-                TaskStatusUpdateEvent(
-                    kind="status-update",
-                    task_id=task_id,
-                    context_id=task.context_id,
-                    status=status,
-                    final=True,
-                ),
-            )
-            # Do NOT call event_bus.cleanup() or cancel_registry.cleanup()
-            # here — WorkerAdapter is the sole owner of cleanup.  It will
-            # clean up when it dequeues the operation and sees the cancel
-            # flag.
-            return await self.storage.load_task(task_id)
-
-        # For working tasks: wait for worker cooperation + force-cancel fallback.
+        # Force-cancel fallback for the case where the worker doesn't react.
         fut = asyncio.create_task(
             self._force_cancel_after(task_id, self.cancel_force_timeout_s)
         )
         self._background_tasks.add(fut)
         fut.add_done_callback(self._background_tasks.discard)
 
-        return await self.storage.load_task(task_id)
+        latest = await self.storage.load_task(task_id)
+        if latest is None:
+            raise TaskNotFoundError(f"Task {task_id} disappeared during cancel")
+        return latest
 
     async def _force_cancel_after(self, task_id: str, timeout: float) -> None:
         """Force-cancel a task if it hasn't reached a terminal state.
@@ -328,30 +343,18 @@ class TaskManager:
                     task_id,
                     timeout,
                 )
-                cancel_message = Message(
-                    role=Role.agent,
-                    parts=[Part(TextPart(text="Task was force-canceled after timeout."))],
-                    message_id=str(uuid.uuid4()),
-                )
-                await self.storage.update_task(
-                    task_id, state=TaskState.canceled, messages=[cancel_message]
-                )
-                status = TaskStatus(
-                    state=TaskState.canceled,
-                    timestamp=datetime.now(UTC).isoformat(),
-                    message=cancel_message,
-                )
-                await self.event_bus.publish(
+                emitter = DefaultEventEmitter(self.event_bus, self.storage)
+                await cancel_task_in_storage(
+                    self.storage,
+                    emitter,
                     task_id,
-                    TaskStatusUpdateEvent(
-                        kind="status-update",
-                        task_id=task_id,
-                        context_id=task.context_id,
-                        status=status,
-                        final=True,
-                    ),
+                    task.context_id,
+                    reason="Task was force-canceled after timeout.",
                 )
-                # Do NOT call event_bus.cleanup() or cancel_registry.cleanup()
-                # here — WorkerAdapter is the sole owner of cleanup.
+                # Clean up resources that the worker would normally own.
+                # If the worker never dequeued this task, these would leak.
+                # Cleanup is idempotent — safe even if the worker also calls it.
+                await self.event_bus.cleanup(task_id)
+                await self.cancel_registry.cleanup(task_id)
         except Exception:
             logger.exception("Force-cancel failed for task %s", task_id)

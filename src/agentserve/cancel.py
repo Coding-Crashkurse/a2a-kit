@@ -1,0 +1,95 @@
+"""Shared cancel helper — used by both TaskManager and WorkerAdapter."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import UTC, datetime
+
+from a2a.types import (
+    Message,
+    Part,
+    Role,
+    TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
+    TextPart,
+)
+
+from agentserve.event_emitter import EventEmitter
+from agentserve.storage.base import (
+    TERMINAL_STATES,
+    ConcurrencyError,
+    Storage,
+    TaskTerminalStateError,
+)
+
+logger = logging.getLogger(__name__)
+
+
+async def cancel_task_in_storage(
+    storage: Storage,
+    emitter: EventEmitter,
+    task_id: str,
+    context_id: str | None,
+    reason: str = "Task was canceled.",
+) -> None:
+    """Persist cancel state and broadcast final event.
+
+    Used by both TaskManager (force cancel) and WorkerAdapter
+    (cooperative cancel) to ensure consistent cancel semantics.
+
+    All writes go through ``emitter`` so there is a single write
+    path (Storage + EventBus) rather than parallel direct access.
+
+    Loads the task first to check for terminal state.  If a
+    :class:`ConcurrencyError` is raised (another writer changed the
+    task between load and write), re-loads once and retries if the
+    task is still non-terminal.
+    """
+    task = await storage.load_task(task_id)
+    if task is None:
+        return
+    if task.status.state in TERMINAL_STATES:
+        return
+
+    cancel_message = Message(
+        role=Role.agent,
+        parts=[Part(TextPart(text=reason))],
+        message_id=str(uuid.uuid4()),
+        task_id=task_id,
+        context_id=context_id,
+    )
+    try:
+        await emitter.update_task(
+            task_id,
+            state=TaskState.canceled,
+            messages=[cancel_message],
+        )
+    except (ConcurrencyError, TaskTerminalStateError):
+        # Another writer changed the task between our load and write.
+        # Re-load and retry once if the task is still non-terminal.
+        task = await storage.load_task(task_id)
+        if task is None or task.status.state in TERMINAL_STATES:
+            return
+        await emitter.update_task(
+            task_id,
+            state=TaskState.canceled,
+            messages=[cancel_message],
+        )
+
+    status = TaskStatus(
+        state=TaskState.canceled,
+        timestamp=datetime.now(UTC).isoformat(),
+        message=cancel_message,
+    )
+    await emitter.send_event(
+        task_id,
+        TaskStatusUpdateEvent(
+            kind="status-update",
+            task_id=task_id,
+            context_id=context_id,
+            status=status,
+            final=True,
+        ),
+    )
