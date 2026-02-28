@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from a2a.types import Message, Task, TaskState
+from a2a.types import Message, TaskState
 
 from agentserve.event_bus.base import EventBus
 from agentserve.schema import StreamEvent
@@ -30,15 +30,11 @@ class EventEmitter(ABC):
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
-    ) -> Task:
+    ) -> None:
         """Persist a task state change (and optional artifacts/messages).
 
         When ``state`` is ``None`` the current state is preserved.
-
-        Note: The return value is currently unused by all callers in
-        ``TaskContextImpl``.  Storage backends may return a lightweight
-        Task shell (without full history/artifacts) to avoid expensive
-        reads on write paths.
+        Return value is intentionally void — no caller uses it.
         """
 
     @abstractmethod
@@ -65,9 +61,9 @@ class DefaultEventEmitter(EventEmitter):
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
-    ) -> Task:
+    ) -> None:
         """Persist a task state change via storage."""
-        return await self._storage.update_task(
+        await self._storage.update_task(
             task_id,
             state=state,
             artifacts=artifacts,

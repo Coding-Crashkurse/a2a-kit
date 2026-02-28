@@ -11,13 +11,11 @@ from a2a.types import Artifact, Message, Task, TaskState, TaskStatus
 
 from agentserve.storage.base import (
     ArtifactWrite,
-    ContextMismatchError,
     ContextT,
     ListTasksQuery,
     ListTasksResult,
     Storage,
     TaskNotFoundError,
-    TaskTerminalStateError,
 )
 
 
@@ -131,65 +129,12 @@ class InMemoryStorage(Storage[ContextT]):
         self.tasks[task_id] = task
         return task
 
-    async def append_message(self, task_id: str, message: Message) -> Task:
-        """Append a follow-up message to an existing task."""
-        task = self._get_task_or_raise(task_id)
-        if message.context_id and task.context_id != message.context_id:
-            raise ContextMismatchError(
-                f"contextId {message.context_id!r} does not match "
-                f"task {task_id!r} contextId {task.context_id!r}"
-            )
-        current = task.status.state
-        if self._is_terminal(current):
-            raise TaskTerminalStateError("task is terminal")
-        if self._is_input_required(current):
-            new_state = TaskState.submitted
-        else:
-            new_state = current
-        self._enforce_message_roles(current, [message])
-        self._assign_messages(task, [message])
-        task.status = TaskStatus(
-            state=new_state, timestamp=datetime.now(UTC).isoformat()
-        )
-        task.history.extend([message])
-        return copy.deepcopy(task)
-
     def _get_task_or_raise(self, task_id: str) -> Task:
         """Return the task or raise TaskNotFoundError."""
         task = self.tasks.get(task_id)
         if task is None:
             raise TaskNotFoundError("task not found")
         return task
-
-    async def transition_state(self, task_id: str, state: TaskState) -> Task:
-        """Transition a task to a new state."""
-        task = self._get_task_or_raise(task_id)
-        current = task.status.state
-        if self._handle_terminal_update(current, state, None, None):
-            return copy.deepcopy(task)
-        task.status = TaskStatus(state=state, timestamp=datetime.now(UTC).isoformat())
-        return copy.deepcopy(task)
-
-    async def append_messages(self, task_id: str, messages: list[Message]) -> Task:
-        """Append messages to a task's history."""
-        task = self._get_task_or_raise(task_id)
-        current = task.status.state
-        if self._is_terminal(current):
-            raise TaskTerminalStateError("task is terminal")
-        self._enforce_message_roles(current, messages)
-        self._assign_messages(task, messages)
-        task.history.extend(messages)
-        return copy.deepcopy(task)
-
-    async def upsert_artifact(
-        self, task_id: str, artifact: Artifact, *, append: bool = False
-    ) -> Task:
-        """Insert or update an artifact on a task."""
-        task = self._get_task_or_raise(task_id)
-        if self._is_terminal(task.status.state):
-            raise TaskTerminalStateError("task is terminal")
-        self._apply_artifact(task, artifact, append=append)
-        return copy.deepcopy(task)
 
     async def update_task(
         self,
@@ -202,24 +147,14 @@ class InMemoryStorage(Storage[ContextT]):
     ) -> Task:
         """Atomically apply messages, artifacts, and state transition.
 
+        Pure CRUD — no business-logic validation.  All precondition
+        checks (terminal guard, role enforcement, context mismatch)
+        are handled by :class:`TaskManager` before this method is called.
+
         When ``state`` is ``None`` the current state is preserved.
-        All precondition checks run before any mutation so that a failure
-        in one step never leaves the task in a partially-updated state.
         """
         task = self._get_task_or_raise(task_id)
-        current = task.status.state
-        effective_state = state if state is not None else current
 
-        # 1. Terminal guard — must be FIRST
-        if self._handle_terminal_update(current, effective_state, artifacts, messages):
-            return copy.deepcopy(task)
-
-        # 2. Validate all preconditions BEFORE any mutation
-        if messages:
-            self._enforce_message_roles(current, messages)
-        # (artifacts have no precondition beyond terminal, already checked)
-
-        # 3. Apply all mutations
         if messages:
             self._assign_messages(task, messages)
             task.history.extend(messages)

@@ -24,7 +24,7 @@ from a2a.types import (
 from agentserve.broker import Broker, CancelRegistry, OperationHandle
 from agentserve.event_bus.base import EventBus
 from agentserve.storage import Storage
-from agentserve.storage.base import TaskTerminalStateError
+from agentserve.storage.base import TERMINAL_STATES, TaskTerminalStateError
 from agentserve.worker.base import Worker
 from agentserve.worker.context_factory import ContextFactory
 
@@ -70,7 +70,7 @@ class WorkerAdapter:
     async def _broker_loop(self) -> None:
         """Continuously receive and dispatch broker operations."""
         async with anyio.create_task_group() as tg:
-            async for handle in await self._broker.receive_task_operations():
+            async for handle in self._broker.receive_task_operations():
                 tg.start_soon(self._handle_op, handle)
 
     async def _handle_op(self, handle: OperationHandle) -> None:
@@ -135,7 +135,12 @@ class WorkerAdapter:
         emitter = self._context_factory.emitter
         cancel_event = self._cancel_registry.on_cancel(task_id)
         if await self._cancel_registry.is_cancelled(task_id):
-            await self._mark_canceled(emitter, task_id, context_id)
+            # Check if the task is already terminal (e.g. TaskManager's
+            # instant cancel on submitted).  If so, skip _mark_canceled
+            # to avoid double-writing.
+            current = await self._context_factory._storage.load_task(task_id)
+            if not current or current.status.state not in TERMINAL_STATES:
+                await self._mark_canceled(emitter, task_id, context_id)
             return
 
         ctx = await self._context_factory.build(

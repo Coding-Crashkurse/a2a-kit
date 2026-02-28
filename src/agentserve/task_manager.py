@@ -28,11 +28,15 @@ from agentserve.schema import DIRECT_REPLY_KEY, DirectReply, StreamEvent
 from agentserve.storage import Storage
 from agentserve.storage.base import (
     TERMINAL_STATES,
+    ContextMismatchError,
     ListTasksQuery,
     ListTasksResult,
+    TaskNotAcceptingMessagesError,
     TaskNotCancelableError,
     TaskNotFoundError,
+    TaskTerminalStateError,
     UnsupportedOperationError,
+    _is_agent_role,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +75,58 @@ class TaskManager:
         default_factory=set, init=False, repr=False
     )
 
+    async def _submit_task(self, context_id: str, message: Message) -> Task:
+        """Route, validate, and persist a user message submission.
+
+        All business rules live here — Storage is pure CRUD.
+
+        For new tasks (no ``message.task_id``): delegates to
+        ``storage.create_task``.
+
+        For follow-ups (``message.task_id`` set):
+        - Raises ``TaskNotFoundError`` if the task doesn't exist.
+        - Raises ``TaskTerminalStateError`` if the task is terminal.
+        - Raises ``ContextMismatchError`` if context IDs don't match.
+        - Raises ``TaskNotAcceptingMessagesError`` if a non-agent message
+          is sent to a task not in ``input_required``.
+        - Transitions ``input_required → submitted`` automatically.
+        """
+        if not message.task_id:
+            return await self.storage.create_task(context_id, message)
+
+        task = await self.storage.load_task(message.task_id)
+        if task is None:
+            raise TaskNotFoundError(f"Task {message.task_id} not found")
+
+        current = task.status.state
+
+        # Terminal guard
+        if current in TERMINAL_STATES:
+            raise TaskTerminalStateError("task is terminal")
+
+        # Context mismatch
+        if message.context_id and task.context_id != message.context_id:
+            raise ContextMismatchError(
+                f"contextId {message.context_id!r} does not match "
+                f"task {message.task_id!r} contextId {task.context_id!r}"
+            )
+
+        # Role enforcement: only agent messages allowed outside input_required
+        if current != TaskState.input_required:
+            if not all(
+                _is_agent_role(getattr(m, "role", None)) for m in [message]
+            ):
+                raise TaskNotAcceptingMessagesError(current)
+
+        # Auto-transition input_required → submitted
+        new_state: TaskState | None = None
+        if current == TaskState.input_required:
+            new_state = TaskState.submitted
+
+        return await self.storage.update_task(
+            task.id, state=new_state, messages=[message]
+        )
+
     async def send_message(self, params: MessageSendParams) -> Task | Message:
         """Submit a task and optionally block until completion.
 
@@ -81,7 +137,7 @@ class TaskManager:
         msg = params.message
         is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
-        task = await self.storage.submit_task(context_id, msg)
+        task = await self._submit_task(context_id, msg)
 
         params.message.context_id = context_id
         params.message.task_id = task.id
@@ -91,23 +147,22 @@ class TaskManager:
             # Subscribe BEFORE starting broker to avoid race condition:
             # events published between broker.run_task and subscribe would
             # be lost if we subscribed after.
-            sub = await self.event_bus.subscribe(task.id)
+            async with self.event_bus.subscribe(task.id) as sub:
+                fut = asyncio.create_task(
+                    self.broker.run_task(params, is_new_task=is_new)
+                )
+                self._background_tasks.add(fut)
+                fut.add_done_callback(self._background_tasks.discard)
 
-            fut = asyncio.create_task(
-                self.broker.run_task(params, is_new_task=is_new)
-            )
-            self._background_tasks.add(fut)
-            fut.add_done_callback(self._background_tasks.discard)
-
-            try:
-                async with asyncio.timeout(self.default_blocking_timeout_s):
-                    async for ev in sub:
-                        if isinstance(ev, DirectReply):
-                            direct_message = ev.message
-                        if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
-                            break
-            except TimeoutError:
-                logger.info("Blocking wait timed out for task %s", task.id)
+                try:
+                    async with asyncio.timeout(self.default_blocking_timeout_s):
+                        async for ev in sub:
+                            if isinstance(ev, DirectReply):
+                                direct_message = ev.message
+                            if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
+                                break
+                except TimeoutError:
+                    logger.info("Blocking wait timed out for task %s", task.id)
         else:
             # Non-blocking: just enqueue and return immediately
             fut = asyncio.create_task(
@@ -140,7 +195,7 @@ class TaskManager:
         msg = params.message
         is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
-        task = await self.storage.submit_task(context_id, msg)
+        task = await self._submit_task(context_id, msg)
         yield task
 
         params.message.context_id = context_id
@@ -148,14 +203,13 @@ class TaskManager:
 
         # Subscribe BEFORE starting broker — prevents race condition
         # where events published between run_task and subscribe are lost.
-        sub = await self.event_bus.subscribe(task.id)
+        async with self.event_bus.subscribe(task.id) as sub:
+            fut = asyncio.create_task(self.broker.run_task(params, is_new_task=is_new))
+            self._background_tasks.add(fut)
+            fut.add_done_callback(self._background_tasks.discard)
 
-        fut = asyncio.create_task(self.broker.run_task(params, is_new_task=is_new))
-        self._background_tasks.add(fut)
-        fut.add_done_callback(self._background_tasks.discard)
-
-        async for ev in sub:
-            yield ev
+            async for ev in sub:
+                yield ev
 
     async def subscribe_task(self, task_id: str) -> AsyncGenerator[StreamEvent, None]:
         """Subscribe to updates for an existing task.
@@ -173,11 +227,10 @@ class TaskManager:
 
         # Subscribe BEFORE yielding — prevents event loss between
         # load_task and subscribe.
-        sub = await self.event_bus.subscribe(task_id)
-
-        yield task
-        async for ev in sub:
-            yield ev
+        async with self.event_bus.subscribe(task_id) as sub:
+            yield task
+            async for ev in sub:
+                yield ev
 
     async def get_task(
         self, task_id: str, history_length: int | None = None
@@ -240,11 +293,10 @@ class TaskManager:
                     final=True,
                 ),
             )
-            await self.event_bus.cleanup(task_id)
-            # Do NOT call cancel_registry.cleanup() here — the worker
-            # may still dequeue this operation and needs the cancel flag
-            # to detect early termination.  Cleanup happens in the
-            # worker's finally block.
+            # Do NOT call event_bus.cleanup() or cancel_registry.cleanup()
+            # here — WorkerAdapter is the sole owner of cleanup.  It will
+            # clean up when it dequeues the operation and sees the cancel
+            # flag.
             return await self.storage.load_task(task_id)
 
         # For working tasks: wait for worker cooperation + force-cancel fallback.
@@ -299,7 +351,7 @@ class TaskManager:
                         final=True,
                     ),
                 )
-                await self.event_bus.cleanup(task_id)
-                await self.cancel_registry.cleanup(task_id)
+                # Do NOT call event_bus.cleanup() or cancel_registry.cleanup()
+                # here — WorkerAdapter is the sole owner of cleanup.
         except Exception:
             logger.exception("Force-cancel failed for task %s", task_id)

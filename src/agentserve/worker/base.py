@@ -355,7 +355,6 @@ class TaskContextImpl(TaskContext):
             previous_artifacts if previous_artifacts is not None else []
         )
         self._turn_ended: bool = False
-        self._responded_with_message: bool = False
 
     @property
     def is_cancelled(self) -> bool:
@@ -512,7 +511,7 @@ class TaskContextImpl(TaskContext):
         self._turn_ended = True
 
     async def respond(self, text: str | None = None) -> None:
-        """Complete the task with a direct message response (no artifact created)."""
+        """Complete the task with a status message (no artifact created)."""
         msg_parts = [Part(TextPart(text=text))] if text else []
         message = Message(
             role=Role.agent,
@@ -525,9 +524,9 @@ class TaskContextImpl(TaskContext):
             state=TaskState.completed,
             messages=[message],
         )
-        await self._emitter.send_event(self.task_id, message)
-        await self._emit_status(TaskState.completed)
-        self._responded_with_message = True
+        # No separate message event — the message is persisted in Storage.
+        # The completed status is broadcast via _emit_status below.
+        await self._emit_status(TaskState.completed, message_text=text)
         self._turn_ended = True
 
     async def reply_directly(self, text: str) -> None:

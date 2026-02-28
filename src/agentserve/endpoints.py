@@ -15,7 +15,7 @@ from a2a.types import (
     TaskState,
     TaskStatusUpdateEvent,
 )
-from fastapi import APIRouter, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
@@ -24,6 +24,8 @@ from pydantic import BaseModel
 from agentserve.schema import DirectReply, StreamEvent
 from agentserve.storage.base import ListTasksQuery, TaskNotCancelableError, TaskNotFoundError
 from agentserve.task_manager import TaskManager
+
+SUPPORTED_A2A_VERSION = "0.3"
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,45 @@ def _wrap_stream_event(event: StreamEvent) -> str:
     return json.dumps(raw)
 
 
+def _check_a2a_version(
+    a2a_version: str | None = Header(None, alias="A2A-Version"),
+) -> None:
+    """Validate the A2A-Version request header (spec §3.6.2).
+
+    Pre-1.0: match Major.Minor exactly (breaking changes between minors).
+    Post-1.0: match Major only (semver guarantees within major).
+    Missing header is tolerated — spec says assume 0.3.
+    """
+    if a2a_version is None:
+        return
+
+    def _major_minor(v: str) -> tuple[str, str]:
+        parts = v.strip().split(".")
+        return (parts[0], parts[1] if len(parts) > 1 else "0")
+
+    client = _major_minor(a2a_version)
+    supported = _major_minor(SUPPORTED_A2A_VERSION)
+
+    # Pre-1.0: minor versions are breaking, match both
+    # Post-1.0: only major needs to match (standard semver)
+    if supported[0] == "0":
+        compatible = client == supported
+    else:
+        compatible = client[0] == supported[0]
+
+    if not compatible:
+        raise HTTPException(
+            status_code=406,
+            detail={
+                "code": -32009,
+                "message": (
+                    f"Unsupported A2A version: {a2a_version}. "
+                    f"This server supports {SUPPORTED_A2A_VERSION}."
+                ),
+            },
+        )
+
+
 def _get_tm(request: Request) -> TaskManager:
     """Extract the TaskManager from app state."""
     tm = getattr(request.app.state, "task_manager", None)
@@ -74,7 +115,7 @@ def _validate_ids(params: MessageSendParams) -> MessageSendParams:
 
 def build_a2a_router() -> APIRouter:
     """Build and return the complete A2A API router."""
-    router = APIRouter()
+    router = APIRouter(dependencies=[Depends(_check_a2a_version)])
 
     @router.post("/v1/message:send")
     async def message_send(
@@ -103,6 +144,11 @@ def build_a2a_router() -> APIRouter:
             try:
                 yield _wrap_stream_event(first_event)
                 async for ev in agen:
+                    # DirectReply is an internal framework event for the
+                    # non-streaming path. In SSE, skip it — the client
+                    # sees the completed status via TaskStatusUpdateEvent.
+                    if isinstance(ev, DirectReply):
+                        continue
                     yield _wrap_stream_event(ev)
             except Exception:
                 logger.exception("SSE stream aborted")
@@ -186,6 +232,8 @@ def build_a2a_router() -> APIRouter:
             try:
                 yield _wrap_stream_event(first_event)
                 async for ev in agen:
+                    if isinstance(ev, DirectReply):
+                        continue
                     yield _wrap_stream_event(ev)
             except Exception:
                 logger.exception("SSE subscribe stream aborted")

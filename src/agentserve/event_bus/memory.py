@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 
 import anyio
 from a2a.types import TaskStatusUpdateEvent
-from anyio.streams.memory import MemoryObjectSendStream
+from anyio.streams.memory import (
+    MemoryObjectReceiveStream,
+    MemoryObjectSendStream,
+)
 
 from agentserve.event_bus.base import EventBus
 from agentserve.schema import StreamEvent
@@ -51,25 +54,18 @@ class InMemoryEventBus(EventBus):
                 self._event_subscribers.pop(task_id, None)
         return None
 
+    @asynccontextmanager
     async def subscribe(
         self, task_id: str, *, after_event_id: str | None = None
-    ) -> AsyncIterator[StreamEvent]:
-        """Subscribe to stream events (after_event_id is ignored)."""
-        return self._subscribe_iter(task_id)
-
-    async def _subscribe_iter(self, task_id: str) -> AsyncIterator[StreamEvent]:
-        """Yield events until a final status event arrives."""
+    ) -> AsyncIterator[AsyncIterator[StreamEvent]]:
+        """Subscribe to stream events. Cleanup is guaranteed by context manager."""
         send_stream, recv_stream = anyio.create_memory_object_stream[StreamEvent](
             max_buffer_size=self._event_buffer
         )
         async with self._subscriber_lock:
             self._event_subscribers.setdefault(task_id, []).append(send_stream)
         try:
-            async with recv_stream:
-                async for ev in recv_stream:
-                    yield ev
-                    if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
-                        break
+            yield self._iter_events(recv_stream)
         finally:
             async with self._subscriber_lock:
                 lst = self._event_subscribers.get(task_id)
@@ -79,6 +75,17 @@ class InMemoryEventBus(EventBus):
                     if not lst:
                         self._event_subscribers.pop(task_id, None)
             await send_stream.aclose()
+            await recv_stream.aclose()
+
+    async def _iter_events(
+        self,
+        recv_stream: MemoryObjectReceiveStream[StreamEvent],
+    ) -> AsyncIterator[StreamEvent]:
+        """Yield events until a final status event arrives."""
+        async for ev in recv_stream:
+            yield ev
+            if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
+                break
 
     async def cleanup(self, task_id: str) -> None:
         """Remove subscriber state for a completed task."""

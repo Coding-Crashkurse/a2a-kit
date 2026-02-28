@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import AsyncExitStack
 from typing import Any, Self
 
@@ -123,16 +123,12 @@ class InMemoryBroker(Broker):
             _RunTask(operation="run", params=params, is_new_task=is_new_task)
         )
 
-    async def receive_task_operations(self) -> AsyncIterator[OperationHandle]:
-        """Receive task operations from the internal queue."""
-        return self._receive_ops()
-
-    async def _requeue(self, op: TaskOperation) -> None:
-        """Re-enqueue an operation after nack."""
-        await self._ops_write.send(op)
-
-    async def _receive_ops(self) -> AsyncIterator[OperationHandle]:
+    async def receive_task_operations(self) -> AsyncGenerator[OperationHandle, None]:
         """Yield operation handles from the internal queue."""
         async with self._ops_read:
             async for op in self._ops_read:
                 yield InMemoryOperationHandle(op, self._requeue)
+
+    async def _requeue(self, op: TaskOperation) -> None:
+        """Re-enqueue an operation after nack."""
+        await self._ops_write.send(op)

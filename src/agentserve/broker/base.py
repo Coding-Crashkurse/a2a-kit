@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from types import TracebackType
 from typing import Generic, Literal, Self, TypeVar
 
@@ -95,6 +95,14 @@ class CancelRegistry(ABC):
     async def cleanup(self, task_id: str) -> None:
         """Release resources for a completed task.
 
+        MUST be idempotent. Multiple calls with the same task_id
+        MUST NOT raise and MUST NOT affect resources for other tasks.
+        Called exactly once per task lifecycle by WorkerAdapter.
+
+        NO OTHER COMPONENT may call this method. TaskManager,
+        Endpoints, and ContextFactory MUST NOT call cleanup.
+        WorkerAdapter is the sole owner of cleanup lifecycle.
+
         Backends MUST implement this to avoid resource leaks
         (e.g. Redis key cleanup).
         """
@@ -120,5 +128,17 @@ class Broker(ABC):
     ) -> None: ...
 
     @abstractmethod
-    async def receive_task_operations(self) -> AsyncIterator[OperationHandle]:
-        """Receive task operations. Connection setup may be async."""
+    def receive_task_operations(self) -> AsyncGenerator[OperationHandle, None]:
+        """Yield task operations from the queue.
+
+        This is an async generator — implementations yield OperationHandle
+        instances directly:
+
+            async def receive_task_operations(self):
+                async for msg in self._queue:
+                    yield InMemoryOperationHandle(msg)
+
+        The generator runs indefinitely until the broker is shut down.
+        Connection lifecycle (connect, channel setup, teardown) is managed
+        by the Broker's ``__aenter__``/``__aexit__``.
+        """
