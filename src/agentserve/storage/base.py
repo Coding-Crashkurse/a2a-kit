@@ -168,6 +168,7 @@ class Storage(ABC, Generic[ContextT]):
         task_id: str,
         state: TaskState | None = None,
         *,
+        status_message: Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
@@ -187,6 +188,12 @@ class Storage(ABC, Generic[ContextT]):
         When ``state`` is ``None`` the current state MUST be preserved
         (keep-current semantics) — useful for pure artifact or message
         appends without a state transition.
+
+        When ``status_message`` is provided alongside a ``state``
+        transition, it is stored in ``task.status.message`` so that
+        polling clients (``tasks/get``, blocking ``message/send``)
+        see the agent's message in the status object (A2A §9.4).
+        Ignored when ``state`` is ``None``.
 
         Each :class:`ArtifactWrite` carries its own ``append`` flag so
         that callers can mix append and replace operations in a single

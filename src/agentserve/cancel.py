@@ -64,6 +64,7 @@ async def cancel_task_in_storage(
         await emitter.update_task(
             task_id,
             state=TaskState.canceled,
+            status_message=cancel_message,
             messages=[cancel_message],
         )
     except (ConcurrencyError, TaskTerminalStateError):
@@ -75,6 +76,7 @@ async def cancel_task_in_storage(
         await emitter.update_task(
             task_id,
             state=TaskState.canceled,
+            status_message=cancel_message,
             messages=[cancel_message],
         )
 

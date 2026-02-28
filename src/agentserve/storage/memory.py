@@ -157,6 +157,7 @@ class InMemoryStorage(Storage[ContextT]):
         task_id: str,
         state: TaskState | None = None,
         *,
+        status_message: Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
@@ -194,7 +195,9 @@ class InMemoryStorage(Storage[ContextT]):
 
         if state is not None:
             task.status = TaskStatus(
-                state=state, timestamp=datetime.now(UTC).isoformat()
+                state=state,
+                timestamp=datetime.now(UTC).isoformat(),
+                message=status_message,
             )
 
         return None

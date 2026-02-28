@@ -507,7 +507,10 @@ class TaskContextImpl(TaskContext):
         """Mark the task as failed with an error reason."""
         fail_message = self._make_agent_message([Part(TextPart(text=reason))])
         await self._versioned_update(
-            self.task_id, state=TaskState.failed, messages=[fail_message]
+            self.task_id,
+            state=TaskState.failed,
+            status_message=fail_message,
+            messages=[fail_message],
         )
         await self._emit_status(TaskState.failed, message=fail_message)
         self._turn_ended = True
@@ -519,7 +522,10 @@ class TaskContextImpl(TaskContext):
             [Part(TextPart(text=reject_text))]
         )
         await self._versioned_update(
-            self.task_id, state=TaskState.rejected, messages=[reject_message]
+            self.task_id,
+            state=TaskState.rejected,
+            status_message=reject_message,
+            messages=[reject_message],
         )
         await self._emit_status(TaskState.rejected, message=reject_message)
         self._turn_ended = True
@@ -530,7 +536,10 @@ class TaskContextImpl(TaskContext):
             [Part(TextPart(text=question))]
         )
         await self._versioned_update(
-            self.task_id, state=TaskState.input_required, messages=[input_message]
+            self.task_id,
+            state=TaskState.input_required,
+            status_message=input_message,
+            messages=[input_message],
         )
         await self._emit_status(TaskState.input_required, message=input_message)
         self._turn_ended = True
@@ -542,7 +551,10 @@ class TaskContextImpl(TaskContext):
             [Part(TextPart(text=auth_text))]
         )
         await self._versioned_update(
-            self.task_id, state=TaskState.auth_required, messages=[auth_message]
+            self.task_id,
+            state=TaskState.auth_required,
+            status_message=auth_message,
+            messages=[auth_message],
         )
         await self._emit_status(TaskState.auth_required, message=auth_message)
         self._turn_ended = True
@@ -554,6 +566,7 @@ class TaskContextImpl(TaskContext):
         await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
+            status_message=respond_message,
             messages=[respond_message],
         )
         await self._emit_status(TaskState.completed, message=respond_message)
@@ -576,6 +589,7 @@ class TaskContextImpl(TaskContext):
         await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
+            status_message=message,
             messages=[message],
             task_metadata={DIRECT_REPLY_KEY: message.message_id},
         )

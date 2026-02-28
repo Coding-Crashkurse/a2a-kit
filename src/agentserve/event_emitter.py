@@ -36,6 +36,7 @@ class EventEmitter(ABC):
         task_id: str,
         state: TaskState | None = None,
         *,
+        status_message: Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
@@ -44,6 +45,8 @@ class EventEmitter(ABC):
         """Persist a task state change (and optional artifacts/messages).
 
         When ``state`` is ``None`` the current state is preserved.
+        When ``status_message`` is provided alongside a ``state``
+        transition, it is stored in ``task.status.message``.
         When ``expected_version`` is provided, it is passed through to
         Storage for optimistic concurrency control.
 
@@ -72,6 +75,7 @@ class DefaultEventEmitter(EventEmitter):
         task_id: str,
         state: TaskState | None = None,
         *,
+        status_message: Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
@@ -81,6 +85,7 @@ class DefaultEventEmitter(EventEmitter):
         return await self._storage.update_task(
             task_id,
             state=state,
+            status_message=status_message,
             artifacts=artifacts,
             messages=messages,
             task_metadata=task_metadata,

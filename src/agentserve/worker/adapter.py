@@ -261,7 +261,10 @@ class WorkerAdapter:
         )
         try:
             await emitter.update_task(
-                task_id, state=TaskState.failed, messages=[error_message]
+                task_id,
+                state=TaskState.failed,
+                status_message=error_message,
+                messages=[error_message],
             )
         except TaskTerminalStateError:
             return

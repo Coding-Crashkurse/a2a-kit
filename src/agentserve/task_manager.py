@@ -85,6 +85,21 @@ class TaskManager:
         default_factory=set, init=False, repr=False
     )
 
+    def _track_background(self, coro) -> asyncio.Task:
+        """Create a tracked background task with exception logging."""
+        fut = asyncio.create_task(coro)
+        self._background_tasks.add(fut)
+        fut.add_done_callback(self._on_background_done)
+        return fut
+
+    def _on_background_done(self, fut: asyncio.Task) -> None:
+        """Log exceptions from background tasks and remove from tracking set."""
+        self._background_tasks.discard(fut)
+        if not fut.cancelled() and fut.exception():
+            logger.error(
+                "Background task failed: %s", fut.exception(), exc_info=fut.exception()
+            )
+
     async def _submit_task(self, context_id: str, message: Message) -> Task:
         """Route, validate, and persist a user message submission.
 
@@ -173,11 +188,9 @@ class TaskManager:
             # events published between broker.run_task and subscribe would
             # be lost if we subscribed after.
             async with self.event_bus.subscribe(task.id) as sub:
-                fut = asyncio.create_task(
+                self._track_background(
                     self.broker.run_task(params, is_new_task=is_new)
                 )
-                self._background_tasks.add(fut)
-                fut.add_done_callback(self._background_tasks.discard)
 
                 try:
                     async with asyncio.timeout(self.default_blocking_timeout_s):
@@ -190,11 +203,9 @@ class TaskManager:
                     logger.info("Blocking wait timed out for task %s", task.id)
         else:
             # Non-blocking: just enqueue and return immediately
-            fut = asyncio.create_task(
+            self._track_background(
                 self.broker.run_task(params, is_new_task=is_new)
             )
-            self._background_tasks.add(fut)
-            fut.add_done_callback(self._background_tasks.discard)
 
         if direct_message is not None:
             return direct_message
@@ -238,17 +249,22 @@ class TaskManager:
         # Subscribe BEFORE starting broker — prevents race condition
         # where events published between run_task and subscribe are lost.
         async with self.event_bus.subscribe(task.id) as sub:
-            fut = asyncio.create_task(self.broker.run_task(params, is_new_task=is_new))
-            self._background_tasks.add(fut)
-            fut.add_done_callback(self._background_tasks.discard)
+            self._track_background(
+                self.broker.run_task(params, is_new_task=is_new)
+            )
 
             async for ev in sub:
                 yield ev
 
-    async def subscribe_task(self, task_id: str) -> AsyncGenerator[StreamEvent, None]:
+    async def subscribe_task(
+        self, task_id: str, *, after_event_id: str | None = None
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Subscribe to updates for an existing task.
 
         Yields the current task state first, then streams live events.
+        When ``after_event_id`` is provided (from SSE ``Last-Event-ID``
+        header), backends that support replay (e.g. Redis Streams)
+        deliver events published after that ID.
         Raises ``UnsupportedOperationError`` if the task is in a terminal state.
         """
         task = await self.storage.load_task(task_id)
@@ -261,7 +277,9 @@ class TaskManager:
 
         # Subscribe BEFORE yielding — prevents event loss between
         # load_task and subscribe.
-        async with self.event_bus.subscribe(task_id) as sub:
+        async with self.event_bus.subscribe(
+            task_id, after_event_id=after_event_id
+        ) as sub:
             yield task
             async for ev in sub:
                 yield ev
@@ -312,11 +330,9 @@ class TaskManager:
         await self.cancel_registry.request_cancel(task_id)
 
         # Force-cancel fallback for the case where the worker doesn't react.
-        fut = asyncio.create_task(
+        self._track_background(
             self._force_cancel_after(task_id, self.cancel_force_timeout_s)
         )
-        self._background_tasks.add(fut)
-        fut.add_done_callback(self._background_tasks.discard)
 
         latest = await self.storage.load_task(task_id)
         if latest is None:

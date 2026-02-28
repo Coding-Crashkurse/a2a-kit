@@ -213,11 +213,13 @@ def build_a2a_router() -> APIRouter:
 
     @router.post("/v1/tasks/{task_id}:subscribe")
     async def tasks_subscribe(
-        request: Request, task_id: str = Path()
+        request: Request,
+        task_id: str = Path(),
+        last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     ) -> EventSourceResponse:
         """Subscribe to updates for an existing task via SSE."""
         tm = _get_tm(request)
-        agen = tm.subscribe_task(task_id)
+        agen = tm.subscribe_task(task_id, after_event_id=last_event_id)
         first_event = await anext(agen)
 
         async def sse_gen() -> AsyncIterator[str]:
