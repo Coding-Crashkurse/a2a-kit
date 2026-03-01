@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/a2akit)](https://pypi.org/project/a2akit/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/a2akit)](https://pypi.org/project/a2akit/)
-[![CI](https://github.com/markuslang1987/a2akit/actions/workflows/ci.yml/badge.svg)](https://github.com/markuslang1987/a2akit/actions)
+[![CI](https://github.com/Coding-Crashkurse/a2a-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Coding-Crashkurse/a2a-kit/actions)
 
 **A2A agent framework in one import.**
 
