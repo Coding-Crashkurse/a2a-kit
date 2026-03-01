@@ -1,4 +1,4 @@
-# a2a-kit
+# agentserve
 
 A2A-compliant agent framework. One `Worker` class, one `handle()` method, all endpoints auto-registered.
 
@@ -13,6 +13,48 @@ For the LangGraph example:
 ```bash
 uv sync --extra langgraph
 ```
+
+## Architecture
+
+`agentserve` allows you to bring your own `Storage`, `Broker`, `EventBus`, `CancelRegistry` and `Worker`.
+You can also leverage the in-memory implementations of `Storage` and `Broker` by using `InMemoryStorage` and `InMemoryBroker`.
+
+Let's have a look at how those components fit together:
+
+```mermaid
+graph TD
+    HTTP["HTTP Server\n(FastAPI + SSE)"]
+    TM["TaskManager\n(coordinates)"]
+    WA["WorkerAdapter\n(lifecycle)"]
+    EE["EventEmitter\n(façade)"]
+    B["Broker\n(queues & schedules)"]
+    S["Storage\n(persistence)"]
+    EB["EventBus\n(event fan-out)"]
+    CR["CancelRegistry\n(cancel signals)"]
+    W["Worker\n(your code)"]
+    TC["TaskContext\n(execution API)"]
+
+    HTTP -->|requests / responses| TM
+    TM -->|schedules tasks| B
+    TM -.->|reads / writes| S
+    TM -.->|subscribes| EB
+    TM -.->|cancel signals| CR
+    B -->|delegates execution| WA
+    WA -->|"handle(ctx)"| W
+    W -.->|uses API| TC
+    TC -->|emits via| EE
+    EE -->|writes| S
+    EE -->|publishes| EB
+    WA -.->|checks / cleanup| CR
+```
+
+**TaskManager** handles submission, validation, streaming, and cancellation. It coordinates between Broker, Storage, EventBus, and CancelRegistry — but never touches the Worker directly.
+
+**WorkerAdapter** bridges the Broker queue to your Worker. It manages the lifecycle: dequeue → check cancel → build context → transition to `working` → call `handle(ctx)` → cleanup.
+
+**EventEmitter** is the façade that TaskContext uses to persist state (Storage) and broadcast events (EventBus) without knowing about either directly. Storage writes are authoritative; EventBus is best-effort.
+
+**Pluggable backends:** Swap `Storage`, `Broker`, `EventBus`, and `CancelRegistry` independently — e.g. PostgreSQL storage + Redis broker + Redis event bus. All backends implement their respective ABC.
 
 ## Examples
 
@@ -108,7 +150,7 @@ server = A2AServer(
 | `ctx.message_id` | ID of the triggering message |
 | `ctx.metadata` | Arbitrary metadata from the request |
 | `ctx.is_cancelled` | Check if cancellation was requested |
-| `ctx.terminal_reached` | Whether a terminal method was called |
+| `ctx.turn_ended` | Whether a terminal method was called |
 | `ctx.files` | File parts as `list[FileInfo]` (content, url, filename, media_type) |
 | `ctx.data_parts` | Structured data parts as `list[dict]` |
 | `ctx.history` | Previous messages in this task (`list[HistoryMessage]`) |
@@ -116,6 +158,7 @@ server = A2AServer(
 | `ctx.complete(text?)` | Mark task completed with optional text artifact |
 | `ctx.complete_json(data)` | Complete with a JSON data artifact |
 | `ctx.respond(text?)` | Complete with a direct message (no artifact) |
+| `ctx.reply_directly(text)` | Return a Message directly without task tracking |
 | `ctx.fail(reason)` | Mark task failed |
 | `ctx.reject(reason?)` | Reject the task |
 | `ctx.request_input(question)` | Ask user for more input |
@@ -124,6 +167,8 @@ server = A2AServer(
 | `ctx.emit_text_artifact(...)` | Emit a text artifact chunk |
 | `ctx.emit_data_artifact(data)` | Emit a structured data artifact chunk |
 | `ctx.emit_artifact(...)` | Emit an artifact with any content (text, data, file_bytes, file_url) |
+| `ctx.load_context()` | Load stored context for this conversation |
+| `ctx.update_context(data)` | Store context for this conversation |
 
 ## A2A Endpoints (auto-registered)
 
@@ -132,11 +177,26 @@ server = A2AServer(
 | `/v1/message:send` | POST | Submit task (blocking) |
 | `/v1/message:stream` | POST | Submit task (SSE stream) |
 | `/v1/tasks/{id}` | GET | Get task by ID |
-| `/v1/tasks` | GET | List tasks |
+| `/v1/tasks` | GET | List tasks (filterable, paginated) |
 | `/v1/tasks/{id}:cancel` | POST | Cancel a task |
+| `/v1/tasks/{id}:subscribe` | POST | Subscribe to task updates (SSE) |
 | `/.well-known/agent-card.json` | GET | Agent discovery card |
 | `/v1/health` | GET | Health check |
 
 ## Custom Backends
 
-Implement `Storage` or `Broker` ABCs and pass them to `A2AServer` instead of the default `"memory"` backends.
+Implement `Storage`, `Broker`, `EventBus`, or `CancelRegistry` ABCs and pass them to `A2AServer`:
+
+```python
+from agentserve import A2AServer, AgentCardConfig
+
+server = A2AServer(
+    worker=MyWorker(),
+    agent_card=AgentCardConfig(name="My Agent", description="Does things"),
+    storage=MyPostgresStorage(dsn="..."),
+    broker=MyRedisBroker(url="redis://..."),
+    event_bus=MyRedisEventBus(url="redis://..."),
+)
+```
+
+All four backends are independently swappable. The in-memory defaults (`"memory"`) are suitable for development and single-process deployments.

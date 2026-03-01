@@ -77,14 +77,15 @@ def _to_agent_extension(ext: ExtensionConfig) -> AgentExtension:
 
 def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
     """Build a full AgentCard from user config and the runtime base URL."""
+    agent_url = f"{base_url.rstrip('/')}/v1"
     return AgentCard(
         protocol_version=config.protocol_version,
         name=config.name,
         description=config.description,
-        url=base_url,
+        url=agent_url,
         preferred_transport=TransportProtocol.http_json,
         additional_interfaces=[
-            AgentInterface(url=base_url, transport=TransportProtocol.http_json),
+            AgentInterface(url=agent_url, transport=TransportProtocol.http_json),
         ],
         version=config.version,
         capabilities=AgentCapabilities(

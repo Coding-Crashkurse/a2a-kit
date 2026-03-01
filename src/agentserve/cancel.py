@@ -60,12 +60,14 @@ async def cancel_task_in_storage(
         task_id=task_id,
         context_id=context_id,
     )
+    version = await storage.get_version(task_id)
     try:
         await emitter.update_task(
             task_id,
             state=TaskState.canceled,
             status_message=cancel_message,
             messages=[cancel_message],
+            expected_version=version,
         )
     except (ConcurrencyError, TaskTerminalStateError):
         # Another writer changed the task between our load and write.
@@ -73,11 +75,13 @@ async def cancel_task_in_storage(
         task = await storage.load_task(task_id)
         if task is None or task.status.state in TERMINAL_STATES:
             return
+        version = await storage.get_version(task_id)
         await emitter.update_task(
             task_id,
             state=TaskState.canceled,
             status_message=cancel_message,
             messages=[cancel_message],
+            expected_version=version,
         )
 
     status = TaskStatus(

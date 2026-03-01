@@ -41,7 +41,7 @@ class EventEmitter(ABC):
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
-    ) -> int | None:
+    ) -> int:
         """Persist a task state change (and optional artifacts/messages).
 
         When ``state`` is ``None`` the current state is preserved.
@@ -50,8 +50,7 @@ class EventEmitter(ABC):
         When ``expected_version`` is provided, it is passed through to
         Storage for optimistic concurrency control.
 
-        Returns the new version from Storage (``int`` for DB backends,
-        ``None`` for InMemory).
+        Returns the new version from Storage.
         """
 
     @abstractmethod
@@ -80,7 +79,7 @@ class DefaultEventEmitter(EventEmitter):
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
-    ) -> int | None:
+    ) -> int:
         """Persist a task state change via storage."""
         return await self._storage.update_task(
             task_id,

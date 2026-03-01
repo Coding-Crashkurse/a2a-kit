@@ -45,9 +45,9 @@ class ContextFactory:
                 )
                 previous_artifacts = self._convert_artifacts(task.artifacts or [])
 
-        # initial_version starts as None; the first _versioned_update call
-        # (typically the working-state transition in WorkerAdapter) will
-        # capture the version returned by Storage and track it from there.
+        # initial_version starts as None; WorkerAdapter seeds ctx._version
+        # from the working-state transition's return value before calling
+        # the user worker, closing the OCC chain.
         return TaskContextImpl(
             task_id=message.task_id,
             context_id=message.context_id,

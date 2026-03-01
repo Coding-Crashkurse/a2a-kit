@@ -12,6 +12,7 @@ from a2a.types import Artifact, Message, Task, TaskState, TaskStatus
 from agentserve.storage.base import (
     TERMINAL_STATES,
     ArtifactWrite,
+    ConcurrencyError,
     ContextT,
     ListTasksQuery,
     ListTasksResult,
@@ -28,6 +29,7 @@ class InMemoryStorage(Storage[ContextT]):
         """Initialize empty task and context stores."""
         self.tasks: dict[str, Task] = {}
         self.contexts: dict[str, ContextT] = {}
+        self._versions: dict[str, int] = {}
 
     @staticmethod
     def _trim_history(
@@ -128,8 +130,10 @@ class InMemoryStorage(Storage[ContextT]):
                     return copy.deepcopy(t)
 
         task_id = str(uuid.uuid4())
-        message.task_id = task_id
-        message.context_id = context_id
+        # Copy message for history — Storage MUST NOT mutate the input.
+        history_msg = message.model_copy(
+            update={"task_id": task_id, "context_id": context_id}
+        )
 
         task = Task(
             id=task_id,
@@ -138,11 +142,12 @@ class InMemoryStorage(Storage[ContextT]):
             status=TaskStatus(
                 state=TaskState.submitted, timestamp=datetime.now(UTC).isoformat()
             ),
-            history=[message],
+            history=[history_msg],
             artifacts=[],
             metadata={"_idempotency_key": idempotency_key} if idempotency_key else None,
         )
         self.tasks[task_id] = task
+        self._versions[task_id] = 1
         return task
 
     def _get_task_or_raise(self, task_id: str) -> Task:
@@ -162,18 +167,26 @@ class InMemoryStorage(Storage[ContextT]):
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
-    ) -> int | None:
+    ) -> int:
         """Atomically apply messages, artifacts, and state transition.
 
-        Pure CRUD — no business-logic validation.  All precondition
-        checks (terminal guard, role enforcement, context mismatch)
-        are handled by :class:`TaskManager` before this method is called.
+        Business rules (role enforcement, context mismatch) are
+        handled by :class:`TaskManager`.  Data-integrity constraints
+        (terminal guard, OCC) are enforced here.
 
         When ``state`` is ``None`` the current state is preserved.
-        ``expected_version`` is ignored by InMemory (no versioning).
-        Returns ``None`` (InMemory has no version tracking).
+        Checks ``expected_version`` against an internal counter so
+        that OCC logic in callers is exercised during development.
+        Returns the new version after the write.
         """
         task = self._get_task_or_raise(task_id)
+
+        current_version = self._versions.get(task_id, 1)
+        if expected_version is not None and expected_version != current_version:
+            raise ConcurrencyError(
+                f"Version mismatch for task {task_id}: "
+                f"expected {expected_version}, current {current_version}"
+            )
 
         if state is not None and task.status.state in TERMINAL_STATES:
             raise TaskTerminalStateError(
@@ -200,7 +213,9 @@ class InMemoryStorage(Storage[ContextT]):
                 message=status_message,
             )
 
-        return None
+        new_version = current_version + 1
+        self._versions[task_id] = new_version
+        return new_version
 
     def _apply_artifact(
         self, task: Task, artifact: Artifact, *, append: bool
@@ -224,6 +239,7 @@ class InMemoryStorage(Storage[ContextT]):
 
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task by ID. Returns True if the task existed."""
+        self._versions.pop(task_id, None)
         return self.tasks.pop(task_id, None) is not None
 
     async def delete_context(self, context_id: str) -> int:
@@ -231,8 +247,13 @@ class InMemoryStorage(Storage[ContextT]):
         to_delete = [tid for tid, t in self.tasks.items() if t.context_id == context_id]
         for tid in to_delete:
             del self.tasks[tid]
+            self._versions.pop(tid, None)
         self.contexts.pop(context_id, None)
         return len(to_delete)
+
+    async def get_version(self, task_id: str) -> int | None:
+        """Return current OCC version for a task."""
+        return self._versions.get(task_id)
 
     async def load_context(self, context_id: str) -> ContextT | None:
         """Load stored context for a context_id."""

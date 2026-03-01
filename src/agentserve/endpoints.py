@@ -7,7 +7,6 @@ import logging
 from collections.abc import AsyncIterator
 
 from a2a.types import (
-    AgentCard,
     MessageSendParams,
     Task,
     TaskState,
@@ -25,6 +24,21 @@ SUPPORTED_A2A_VERSION = "0.3.0"
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_task_for_client(task: Task) -> Task:
+    """Strip framework-internal metadata keys before client serialization.
+
+    Keys prefixed with ``_`` are internal (e.g. ``_agentserve_direct_reply``,
+    ``_idempotency_key``) and must not leak to external clients.
+    """
+    md = task.metadata
+    if not md:
+        return task
+    cleaned = {k: v for k, v in md.items() if not k.startswith("_")}
+    if len(cleaned) == len(md):
+        return task  # nothing to strip
+    return task.model_copy(update={"metadata": cleaned or None})
+
+
 def _wrap_stream_event(event: StreamEvent) -> str:
     """Serialize a stream event for SSE (HTTP+JSON/REST transport).
 
@@ -33,9 +47,8 @@ def _wrap_stream_event(event: StreamEvent) -> str:
     """
     if isinstance(event, DirectReply):
         return event.message.model_dump_json(by_alias=True, exclude_none=True)
-    
-    # FIX: Wir haben exclude={"final"} entfernt, damit die A2A-Clients wissen, 
-    # wann der Stream fertig ist und die Verbindung schließen können!
+    if isinstance(event, Task):
+        event = _sanitize_task_for_client(event)
     return event.model_dump_json(by_alias=True, exclude_none=True)
 
 
@@ -67,7 +80,7 @@ def _check_a2a_version(
 
     if not compatible:
         raise HTTPException(
-            status_code=406,
+            status_code=400,
             detail={
                 "code": -32009,
                 "message": (
@@ -116,6 +129,8 @@ def build_a2a_router() -> APIRouter:
         params = _validate_ids(params)
         tm = _get_tm(request)
         result = await tm.send_message(params)
+        if isinstance(result, Task):
+            result = _sanitize_task_for_client(result)
         return JSONResponse(
             content=json.loads(
                 result.model_dump_json(by_alias=True, exclude_none=True)
@@ -154,7 +169,7 @@ def build_a2a_router() -> APIRouter:
         request: Request,
         task_id: str = Path(),
         history_length: int | None = Query(None, alias="historyLength"),
-    ) -> Task:
+    ) -> JSONResponse:
         """Get a single task by ID."""
         tm = _get_tm(request)
         t = await tm.get_task(task_id, history_length)
@@ -162,7 +177,12 @@ def build_a2a_router() -> APIRouter:
             raise HTTPException(
                 status_code=404, detail={"code": -32001, "message": "Task not found"}
             )
-        return t
+        t = _sanitize_task_for_client(t)
+        return JSONResponse(
+            content=json.loads(
+                t.model_dump_json(by_alias=True, exclude_none=True)
+            )
+        )
 
     @router.get("/v1/tasks")
     async def tasks_list(
@@ -187,6 +207,7 @@ def build_a2a_router() -> APIRouter:
             include_artifacts=include_artifacts,
         )
         result = await tm.list_tasks(query)
+        result.tasks = [_sanitize_task_for_client(t) for t in result.tasks]
         return JSONResponse(
             content=json.loads(
                 result.model_dump_json(by_alias=True, exclude_none=True)
@@ -197,11 +218,17 @@ def build_a2a_router() -> APIRouter:
     async def tasks_cancel(
         request: Request,
         task_id: str = Path(),
-    ) -> Task:
+    ) -> JSONResponse:
         """Cancel a task by ID."""
         tm = _get_tm(request)
         try:
-            return await tm.cancel_task(task_id)
+            result = await tm.cancel_task(task_id)
+            result = _sanitize_task_for_client(result)
+            return JSONResponse(
+                content=json.loads(
+                    result.model_dump_json(by_alias=True, exclude_none=True)
+                )
+            )
         except TaskNotFoundError:
             raise HTTPException(
                 status_code=404, detail={"code": -32001, "message": "Task not found"}
@@ -251,13 +278,18 @@ def build_discovery_router(card_config) -> APIRouter:
     router = APIRouter()
 
     @router.get("/.well-known/agent-card.json")
-    async def get_agent_card(request: Request) -> AgentCard:
+    async def get_agent_card(request: Request) -> JSONResponse:
         """Serve the agent discovery card with the correct base URL."""
         base_url = external_base_url(
             dict(request.headers),
             request.url.scheme,
             request.url.netloc,
         )
-        return build_agent_card(card_config, base_url)
+        card = build_agent_card(card_config, base_url)
+        return JSONResponse(
+            content=json.loads(
+                card.model_dump_json(by_alias=True, exclude_none=True)
+            )
+        )
 
     return router

@@ -154,7 +154,7 @@ class TaskManager:
                 f"task {message.task_id!r} contextId {task.context_id!r}"
             )
 
-        if current != TaskState.input_required:
+        if current not in {TaskState.input_required, TaskState.auth_required}:
             if not _is_agent_role(getattr(message, "role", None)):
                 raise TaskNotAcceptingMessagesError(current)
 
@@ -163,7 +163,7 @@ class TaskManager:
     @staticmethod
     def _compute_state_transition(task: Task) -> TaskState | None:
         """Determine the new state based on current task state."""
-        if task.status.state == TaskState.input_required:
+        if task.status.state in {TaskState.input_required, TaskState.auth_required}:
             return TaskState.submitted
         return None
 

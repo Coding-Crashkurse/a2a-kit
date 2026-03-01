@@ -26,7 +26,7 @@ from agentserve.cancel import cancel_task_in_storage
 from agentserve.event_bus.base import EventBus
 from agentserve.event_emitter import DefaultEventEmitter, EventEmitter
 from agentserve.storage import Storage
-from agentserve.storage.base import TERMINAL_STATES, TaskTerminalStateError
+from agentserve.storage.base import TERMINAL_STATES, ConcurrencyError, TaskTerminalStateError
 from agentserve.worker.base import Worker
 from agentserve.worker.context_factory import ContextFactory
 
@@ -142,6 +142,7 @@ class WorkerAdapter:
                 if task_id:
                     await self._mark_failed(
                         self._emitter,
+                        self._storage,
                         task_id,
                         context_id,
                         "Worker failed to process task",
@@ -204,11 +205,17 @@ class WorkerAdapter:
             )
 
             try:
-                await emitter.update_task(task_id, state=TaskState.working)
+                working_version = await emitter.update_task(
+                    task_id, state=TaskState.working
+                )
             except TaskTerminalStateError:
                 # Task was already terminated (e.g., canceled before the
                 # worker picked it up).  Nothing to do — just clean up.
                 return
+
+            # Seed context with the version from the working transition
+            # so subsequent _versioned_update calls use OCC.
+            ctx._version = working_version
 
             await ctx.send_status()
 
@@ -232,7 +239,9 @@ class WorkerAdapter:
                 )
             except Exception as exc:
                 logger.exception("Worker error for task %s", task_id)
-                await self._mark_failed(emitter, task_id, context_id, str(exc))
+                await self._mark_failed(
+                    emitter, self._storage, task_id, context_id, str(exc)
+                )
         finally:
             await self._event_bus.cleanup(task_id)
             await self._cancel_registry.cleanup(task_id)
@@ -249,7 +258,7 @@ class WorkerAdapter:
 
     @staticmethod
     async def _mark_failed(
-        emitter, task_id: str, context_id: str | None, reason: str
+        emitter, storage: Storage, task_id: str, context_id: str | None, reason: str
     ) -> None:
         """Persist failed state (with reason) and emit a final status event."""
         error_message = Message(
@@ -259,14 +268,16 @@ class WorkerAdapter:
             task_id=task_id,
             context_id=context_id,
         )
+        version = await storage.get_version(task_id)
         try:
             await emitter.update_task(
                 task_id,
                 state=TaskState.failed,
                 status_message=error_message,
                 messages=[error_message],
+                expected_version=version,
             )
-        except TaskTerminalStateError:
+        except (ConcurrencyError, TaskTerminalStateError):
             return
         status = TaskStatus(
             state=TaskState.failed,

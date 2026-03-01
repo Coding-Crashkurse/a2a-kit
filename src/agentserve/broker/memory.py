@@ -140,12 +140,15 @@ class InMemoryBroker(Broker):
             await self._ops_write.aclose()
 
     async def receive_task_operations(self) -> AsyncIterator[OperationHandle]:
-        """Yield operation handles from the internal queue."""
-        async with self._ops_read:
-            async for envelope in self._ops_read:
-                yield InMemoryOperationHandle(
-                    envelope.op, self._requeue, envelope.attempt
-                )
+        """Yield operation handles from the internal queue.
+
+        Stream lifecycle is managed by __aenter__/__aexit__ —
+        do NOT use ``async with self._ops_read`` here (double-close).
+        """
+        async for envelope in self._ops_read:
+            yield InMemoryOperationHandle(
+                envelope.op, self._requeue, envelope.attempt
+            )
 
     async def _requeue(self, envelope: _EnqueuedOp) -> None:
         """Re-enqueue an operation after nack."""

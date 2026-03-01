@@ -265,7 +265,17 @@ class TaskContext(ABC):
 
     @abstractmethod
     async def send_status(self, message: str | None = None) -> None:
-        """Emit an intermediate status update (state stays working)."""
+        """Emit an intermediate status update (state stays working).
+
+        When ``message`` is provided, the status message is persisted
+        in Storage so that polling clients (``tasks/get``) can see
+        progress — not just SSE subscribers.  The message is stored
+        in ``task.status.message`` only (NOT appended to history)
+        to keep the write lightweight.
+
+        When ``message`` is ``None``, only a bare working-state event
+        is broadcast (no storage write).
+        """
 
     @abstractmethod
     async def emit_artifact(
@@ -390,7 +400,7 @@ class TaskContextImpl(TaskContext):
         writer), re-loads the task:
         - If terminal → raises ``TaskTerminalStateError`` so the
           caller stops processing (e.g. force-cancel won the race).
-        - If non-terminal → retries once without version constraint.
+        - If non-terminal → retries once with the freshly loaded version.
         """
         try:
             new_version = await self._emitter.update_task(
@@ -403,8 +413,11 @@ class TaskContextImpl(TaskContext):
                 raise TaskTerminalStateError(
                     f"Task {task_id} reached terminal state during update"
                 )
-            # Non-terminal version mismatch: retry once without OCC.
-            new_version = await self._emitter.update_task(task_id, **kwargs)
+            # Non-terminal version mismatch: retry with fresh version.
+            fresh_version = await self._storage.get_version(task_id)
+            new_version = await self._emitter.update_task(
+                task_id, expected_version=fresh_version, **kwargs
+            )
             self._version = new_version
 
     @property
@@ -444,7 +457,7 @@ class TaskContextImpl(TaskContext):
         artifact_writes: list[ArtifactWrite] | None = None
         artifact: Artifact | None = None
 
-        if text:
+        if text is not None:
             final_parts = [Part(TextPart(text=text))]
             artifact = Artifact(artifact_id=artifact_id, parts=final_parts)
             artifact_writes = [ArtifactWrite(artifact)]
@@ -599,7 +612,17 @@ class TaskContextImpl(TaskContext):
 
     async def send_status(self, message: str | None = None) -> None:
         """Emit an intermediate status update (state stays working)."""
-        await self._emit_status(TaskState.working, message_text=message, final=False)
+        status_msg = None
+        if message is not None:
+            status_msg = self._make_agent_message(
+                [Part(TextPart(text=message))]
+            )
+            await self._versioned_update(
+                self.task_id,
+                state=TaskState.working,
+                status_message=status_msg,
+            )
+        await self._emit_status(TaskState.working, message=status_msg, final=False)
 
     async def emit_artifact(
         self,

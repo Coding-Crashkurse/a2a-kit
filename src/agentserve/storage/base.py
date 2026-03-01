@@ -94,15 +94,23 @@ class ArtifactWrite:
 class Storage(ABC, Generic[ContextT]):
     """Abstract storage interface for A2A tasks.
 
-    Storage is pure CRUD — no business logic, no validation.
-    All business rules (terminal guards, role enforcement, state
-    transitions) live in :class:`TaskManager`.
+    Storage handles CRUD and data-integrity constraints (terminal-state
+    guard, optimistic concurrency).  Business rules (role enforcement,
+    state-machine transitions, context matching) live in
+    :class:`TaskManager`.
 
     Subclasses MUST implement 3 abstract methods:
         load_task, create_task, update_task
 
     Optional with sensible defaults:
-        list_tasks, delete_task, delete_context, load_context, update_context
+        list_tasks, delete_task, delete_context, get_version,
+        load_context, update_context
+
+    **Consistency requirement:** Implementations MUST provide
+    read-your-writes consistency.  A ``load_task()`` call following
+    ``update_task()`` or ``create_task()`` on the same connection
+    MUST reflect the preceding write.  For database backends with
+    read replicas, this means reading from the primary after writes.
     """
 
     async def __aenter__(self) -> Self:
@@ -145,6 +153,12 @@ class Storage(ABC, Generic[ContextT]):
     ) -> Task:
         """Create a brand-new task from an initial message.
 
+        **Message contract:** Implementations MUST NOT mutate the input
+        ``message`` object.  Use ``message.model_copy(update=...)`` to
+        create a copy with ``task_id`` and ``context_id`` set for
+        storage.  The caller (TaskManager) is responsible for binding
+        these fields on the original message after this method returns.
+
         If ``idempotency_key`` is provided and a task with the same
         key **and** ``context_id`` already exists, return the existing
         task instead of creating a duplicate.  The key is scoped per
@@ -173,12 +187,12 @@ class Storage(ABC, Generic[ContextT]):
         messages: list[Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
-    ) -> int | None:
+    ) -> int:
         """Persist state change, artifacts, and messages atomically.
 
-        Pure CRUD — no business-logic validation.  All precondition
-        checks (terminal guard, role enforcement, context mismatch)
-        are handled by :class:`TaskManager` before this method is called.
+        Business rules (role enforcement, context mismatch) are
+        handled by :class:`TaskManager`.  Data-integrity constraints
+        (terminal guard, OCC) are enforced here.
 
         **Message binding contract:** All ``Message`` objects in
         ``messages`` MUST have ``task_id`` and ``context_id`` set by
@@ -203,8 +217,9 @@ class Storage(ABC, Generic[ContextT]):
         merged into the task's ``metadata`` dict.
 
         When ``expected_version`` is provided and doesn't match the
-        stored version, raise a :class:`ConcurrencyError`.  InMemory
-        ignores this parameter.  DB backends should implement this as
+        stored version, raise a :class:`ConcurrencyError`.  All
+        backends (including InMemory) MUST check this parameter.
+        DB backends should implement this as
         ``UPDATE ... WHERE id = ? AND version = ?``.
 
         **Terminal-state guard:** Implementations MUST reject state
@@ -221,10 +236,10 @@ class Storage(ABC, Generic[ContextT]):
         visible.  For database backends this means a single transaction.
 
         **Return value:** The new version number after the write.
-        InMemory returns ``None`` (no versioning).  DB backends
-        return the incremented version so callers can use it for
-        subsequent optimistic-concurrency writes.  Use ``load_task()``
-        for reading back complete task state.
+        All backends (including InMemory) MUST return an ``int``
+        so callers can use it for subsequent optimistic-concurrency
+        writes.  Use ``load_task()`` for reading back complete
+        task state.
         """
 
     async def delete_task(self, task_id: str) -> bool:
@@ -234,6 +249,15 @@ class Storage(ABC, Generic[ContextT]):
     async def delete_context(self, context_id: str) -> int:
         """Delete all tasks in a context. Returns the number of deleted tasks."""
         raise NotImplementedError
+
+    async def get_version(self, task_id: str) -> int | None:
+        """Return current optimistic-concurrency version for a task.
+
+        Returns ``None`` when the backend does not support versioning
+        or when ``task_id`` does not exist.  Default implementation
+        returns ``None``.
+        """
+        return None
 
     async def load_context(self, context_id: str) -> ContextT | None:
         """Load stored context for a context_id. Returns None if not found.
