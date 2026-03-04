@@ -18,7 +18,7 @@ from a2a.types import (
 )
 
 from a2akit.cancel import cancel_task_in_storage
-from a2akit.event_emitter import DefaultEventEmitter
+from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
 from a2akit.schema import DIRECT_REPLY_KEY, DirectReply, StreamEvent
 from a2akit.storage.base import (
     TERMINAL_STATES,
@@ -84,6 +84,7 @@ class TaskManager:
     cancel_registry: CancelRegistry
     default_blocking_timeout_s: float = 30.0
     cancel_force_timeout_s: float = 60.0
+    emitter: EventEmitter | None = None
     _background_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
 
     def _track_background(self, coro) -> asyncio.Task:
@@ -364,7 +365,7 @@ class TaskManager:
                     task_id,
                     deadline,
                 )
-                emitter = DefaultEventEmitter(self.event_bus, self.storage)
+                emitter = self.emitter or DefaultEventEmitter(self.event_bus, self.storage)
                 await cancel_task_in_storage(
                     self.storage,
                     emitter,

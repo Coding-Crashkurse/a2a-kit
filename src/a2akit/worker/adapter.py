@@ -63,13 +63,14 @@ class WorkerAdapter:
         max_concurrent_tasks: int | None = None,
         max_retries: int = 3,
         task_lock_factory: TaskLockFactory | None = None,
+        emitter: EventEmitter | None = None,
     ) -> None:
         self._user_worker = user_worker
         self._broker = broker
         self._storage = storage
         self._event_bus = event_bus
         self._cancel_registry = cancel_registry
-        self._emitter = DefaultEventEmitter(event_bus, storage)
+        self._emitter = emitter or DefaultEventEmitter(event_bus, storage)
         self._context_factory = ContextFactory(self._emitter, storage)
         self._max_retries = max_retries
         self._semaphore = anyio.Semaphore(max_concurrent_tasks) if max_concurrent_tasks else None

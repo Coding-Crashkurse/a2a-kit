@@ -17,6 +17,8 @@ from a2akit.broker import (
 )
 from a2akit.endpoints import build_a2a_router, build_discovery_router
 from a2akit.event_bus import EventBus, InMemoryEventBus
+from a2akit.event_emitter import DefaultEventEmitter
+from a2akit.hooks import HookableEmitter, LifecycleHooks
 from a2akit.storage import (
     ContextMismatchError,
     InMemoryStorage,
@@ -51,6 +53,7 @@ class A2AServer:
         cancel_registry: CancelRegistry | None = None,
         blocking_timeout_s: float = 30.0,
         max_concurrent_tasks: int | None = None,
+        hooks: LifecycleHooks | None = None,
     ) -> None:
         """Store configuration for lazy initialization at startup."""
         self._worker = worker
@@ -62,6 +65,7 @@ class A2AServer:
         self._cancel_registry = cancel_registry
         self._blocking_timeout_s = blocking_timeout_s
         self._max_concurrent_tasks = max_concurrent_tasks
+        self._hooks = hooks
 
     def _build_storage(self) -> Storage:
         """Resolve the storage spec into a Storage instance."""
@@ -101,6 +105,10 @@ class A2AServer:
             broker = server._build_broker()
             event_bus = server._build_event_bus()
             cancel_registry = server._cancel_registry or InMemoryCancelRegistry()
+            base_emitter = DefaultEventEmitter(event_bus, storage)
+            emitter = (
+                HookableEmitter(base_emitter, server._hooks) if server._hooks else base_emitter
+            )
             adapter = WorkerAdapter(
                 server._worker,
                 broker,
@@ -108,6 +116,7 @@ class A2AServer:
                 event_bus,
                 cancel_registry,
                 max_concurrent_tasks=server._max_concurrent_tasks,
+                emitter=emitter,
             )
             tm = TaskManager(
                 broker=broker,
@@ -115,6 +124,7 @@ class A2AServer:
                 event_bus=event_bus,
                 cancel_registry=cancel_registry,
                 default_blocking_timeout_s=server._blocking_timeout_s,
+                emitter=emitter,
             )
 
             app.state.task_manager = tm

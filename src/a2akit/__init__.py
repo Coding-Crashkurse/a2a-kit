@@ -9,6 +9,7 @@ from a2akit.broker import (
 )
 from a2akit.event_bus import EventBus, InMemoryEventBus
 from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
+from a2akit.hooks import HookableEmitter, LifecycleHooks
 from a2akit.middleware import A2AMiddleware, RequestEnvelope
 from a2akit.server import A2AServer
 from a2akit.storage import (
@@ -39,10 +40,12 @@ __all__ = [
     "EventEmitter",
     "ExtensionConfig",
     "FileInfo",
+    "HookableEmitter",
     "InMemoryBroker",
     "InMemoryCancelRegistry",
     "InMemoryEventBus",
     "InMemoryStorage",
+    "LifecycleHooks",
     "ListTasksQuery",
     "ListTasksResult",
     "RequestEnvelope",

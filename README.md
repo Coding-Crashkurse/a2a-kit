@@ -67,6 +67,7 @@ curl -X POST http://localhost:8000/v1/message:send \
 - **Cancellation** — cooperative and force-cancel with timeout fallback
 - **Multi-turn** — `request_input()` / `request_auth()` for conversational flows
 - **Direct reply** — `reply_directly()` for simple request/response without task tracking
+- **Lifecycle hooks** — fire-and-forget callbacks on terminal state transitions
 - **Pluggable backends** — swap in Redis, PostgreSQL, RabbitMQ (coming soon)
 - **Type-safe** — full type hints, `py.typed` marker, PEP 561 compliant
 
@@ -84,6 +85,7 @@ graph TD
     TM["TaskManager\n(coordinates)"]
     WA["WorkerAdapter\n(lifecycle)"]
     EE["EventEmitter\n(facade)"]
+    HE["HookableEmitter\n(lifecycle hooks)"]
     B["Broker\n(queues & schedules)"]
     S["Storage\n(persistence)"]
     EB["EventBus\n(event fan-out)"]
@@ -102,7 +104,8 @@ graph TD
     B -->|delegates execution| WA
     WA -->|"handle(ctx)"| W
     W -.->|uses API| TC
-    TC -->|emits via| EE
+    TC -->|emits via| HE
+    HE -->|decorates| EE
     EE -->|writes| S
     EE -->|publishes| EB
     WA -.->|checks / cleanup| CR
@@ -264,6 +267,50 @@ app = server.as_fastapi_app()
 **Execution order:** `before_dispatch` runs in registration order;
 `after_dispatch` runs in reverse (like Python context managers).
 
+## Lifecycle Hooks
+
+Register callbacks that fire after terminal state transitions (completed, failed,
+canceled, rejected). Hooks are fire-and-forget — errors are logged and swallowed,
+never affecting task processing.
+
+```python
+import logging
+
+from a2a.types import Message, TaskState
+
+from a2akit import A2AServer, AgentCardConfig, TaskContext, Worker
+from a2akit.hooks import LifecycleHooks
+
+logger = logging.getLogger(__name__)
+
+
+async def on_terminal(task_id: str, state: TaskState, message: Message | None) -> None:
+    """Called once per task when it reaches a terminal state."""
+    if state == TaskState.completed:
+        logger.info("Task %s completed successfully", task_id)
+    elif state == TaskState.failed:
+        logger.warning("Task %s failed: %s", task_id, message)
+    elif state == TaskState.canceled:
+        logger.info("Task %s was canceled", task_id)
+
+
+class MyWorker(Worker):
+    async def handle(self, ctx: TaskContext) -> None:
+        await ctx.complete(f"Done: {ctx.user_text}")
+
+
+server = A2AServer(
+    worker=MyWorker(),
+    agent_card=AgentCardConfig(name="Hooked Agent", description="...", version="0.1.0"),
+    hooks=LifecycleHooks(on_terminal=on_terminal),
+)
+app = server.as_fastapi_app()
+```
+
+Hooks fire after a successful Storage write. If the write fails (e.g.
+`TaskTerminalStateError` from a concurrent cancel), the hook does not fire.
+The Storage terminal-state guard provides exactly-once delivery per task.
+
 ## A2AServer Configuration
 
 ```python
@@ -281,6 +328,7 @@ server = A2AServer(
     cancel_registry=None,            # or pass a CancelRegistry instance
     blocking_timeout_s=30.0,         # timeout for blocking requests
     max_concurrent_tasks=None,       # limit parallel task execution
+    hooks=LifecycleHooks(...),       # optional lifecycle hooks
 )
 app = server.as_fastapi_app()
 ```
@@ -309,7 +357,7 @@ Planned features for upcoming releases. Priorities may shift based on feedback.
 | Feature | Target |
 |---|---|
 | ~~Request middleware~~ | ~~v0.1.0~~ done |
-| Lifecycle hooks (on_task_completed, etc.) | v0.1.0 |
+| ~~Lifecycle hooks~~ | ~~v0.1.0~~ done |
 | Dependency injection | v0.1.0 |
 | Documentation website | v0.1.0 |
 | Redis EventBus | v0.2.0 |
