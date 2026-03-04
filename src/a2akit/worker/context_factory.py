@@ -32,6 +32,7 @@ class ContextFactory:
         cancel_event: CancelScope,
         *,
         is_new_task: bool = False,
+        request_context: dict[str, Any] | None = None,
     ) -> TaskContextImpl:
         """Construct a TaskContextImpl from a broker message."""
         user_text = self._extract_text(message.parts)
@@ -60,6 +61,7 @@ class ContextFactory:
             storage=self._storage,
             history=history,
             previous_artifacts=previous_artifacts,
+            request_context=request_context,
         )
 
     @staticmethod

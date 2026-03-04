@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Generic, Literal, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeVar
 
 from a2a.types import MessageSendParams
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -27,9 +27,10 @@ class _TaskOperation(BaseModel, Generic[OperationT, ParamsT]):
 
 
 class _RunTask(_TaskOperation[Literal["run"], MessageSendParams]):
-    """Run-task operation with optional new-task hint."""
+    """Run-task operation with optional new-task hint and request context."""
 
     is_new_task: bool = False
+    request_context: dict[str, Any] = Field(default_factory=dict)
 
 
 TaskOperation = _RunTask
@@ -114,7 +115,13 @@ class Broker(ABC):
     """Abstract broker for task scheduling."""
 
     @abstractmethod
-    async def run_task(self, params: MessageSendParams, *, is_new_task: bool = False) -> None: ...
+    async def run_task(
+        self,
+        params: MessageSendParams,
+        *,
+        is_new_task: bool = False,
+        request_context: dict[str, Any] | None = None,
+    ) -> None: ...
 
     @abstractmethod
     async def shutdown(self) -> None:

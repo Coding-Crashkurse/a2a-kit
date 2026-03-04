@@ -13,8 +13,6 @@ class EchoWorker(Worker):
 
 server = A2AServer(
     worker=EchoWorker(),
-    agent_card=AgentCardConfig(
-        name="Echo", description="Echoes input", version="0.1.0"
-    ),
+    agent_card=AgentCardConfig(name="Echo", description="Echoes input", version="0.1.0"),
 )
 app = server.as_fastapi_app()

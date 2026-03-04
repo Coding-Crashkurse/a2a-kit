@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette import EventSourceResponse
 
 from a2akit.agent_card import AgentCardConfig, build_agent_card, external_base_url
+from a2akit.middleware import A2AMiddleware, RequestEnvelope
 from a2akit.schema import DirectReply, StreamEvent
 from a2akit.storage.base import ListTasksQuery, TaskNotCancelableError, TaskNotFoundError
 
@@ -131,7 +132,18 @@ def build_a2a_router() -> APIRouter:
         """
         params = _validate_ids(params)
         tm = _get_tm(request)
-        result = await tm.send_message(params)
+        middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
+
+        envelope = RequestEnvelope(params=params)
+
+        for mw in middlewares:
+            await mw.before_dispatch(envelope, request)
+
+        result = await tm.send_message(envelope.params, request_context=envelope.context)
+
+        for mw in reversed(middlewares):
+            await mw.after_dispatch(envelope, result)
+
         if isinstance(result, Task):
             result = _sanitize_task_for_client(result)
         return JSONResponse(
@@ -143,7 +155,14 @@ def build_a2a_router() -> APIRouter:
         """Submit a message and stream events via SSE."""
         params = _validate_ids(params)
         tm = _get_tm(request)
-        agen = tm.stream_message(params)
+        middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
+
+        envelope = RequestEnvelope(params=params)
+
+        for mw in middlewares:
+            await mw.before_dispatch(envelope, request)
+
+        agen = tm.stream_message(envelope.params, request_context=envelope.context)
         first_event = await anext(agen)
 
         async def sse_gen() -> AsyncIterator[str]:

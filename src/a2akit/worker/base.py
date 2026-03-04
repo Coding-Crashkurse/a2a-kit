@@ -184,6 +184,19 @@ class TaskContext(ABC):
 
     @property
     @abstractmethod
+    def request_context(self) -> dict[str, Any]:
+        """Transient request data from middleware.
+
+        Contains secrets, headers, and other per-request data that
+        was NOT persisted to Storage. Populated by middleware in
+        ``before_dispatch``. Empty dict if no middleware is registered.
+
+        This is separate from ``self.metadata`` which contains
+        persisted data from ``message.metadata``.
+        """
+
+    @property
+    @abstractmethod
     def is_cancelled(self) -> bool:
         """Check whether cancellation has been requested for this task."""
 
@@ -349,6 +362,7 @@ class TaskContextImpl(TaskContext):
         history: list[HistoryMessage] | None = None,
         previous_artifacts: list[PreviousArtifact] | None = None,
         initial_version: int | None = None,
+        request_context: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the task context.
 
@@ -373,6 +387,7 @@ class TaskContextImpl(TaskContext):
         self._previous_artifacts = previous_artifacts if previous_artifacts is not None else []
         self._turn_ended: bool = False
         self._version: int | None = initial_version
+        self._request_context = request_context or {}
 
     def _make_agent_message(self, parts: list[Part], *, metadata: dict | None = None) -> Message:
         """Create an agent Message pre-filled with task_id and context_id."""
@@ -414,6 +429,11 @@ class TaskContextImpl(TaskContext):
                 task_id, expected_version=fresh_version, **kwargs
             )
             self._version = new_version
+
+    @property
+    def request_context(self) -> dict[str, Any]:
+        """Transient request data from middleware."""
+        return self._request_context
 
     @property
     def is_cancelled(self) -> bool:

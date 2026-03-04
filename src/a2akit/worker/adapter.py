@@ -153,9 +153,19 @@ class WorkerAdapter:
     async def _dispatch(self, op: Any) -> None:
         """Route an operation to the appropriate handler."""
         if op.operation == "run":
-            await self._run_task(op.params, is_new_task=op.is_new_task)
+            await self._run_task(
+                op.params,
+                is_new_task=op.is_new_task,
+                request_context=getattr(op, "request_context", None) or {},
+            )
 
-    async def _run_task(self, params: MessageSendParams, *, is_new_task: bool = False) -> None:
+    async def _run_task(
+        self,
+        params: MessageSendParams,
+        *,
+        is_new_task: bool = False,
+        request_context: dict[str, Any] | None = None,
+    ) -> None:
         """Execute the user worker for a submitted task.
 
         When ``task_lock_factory`` is configured, acquires a per-task
@@ -170,12 +180,20 @@ class WorkerAdapter:
         if self._task_lock_factory:
             async with AsyncExitStack() as stack:
                 await stack.enter_async_context(self._task_lock_factory(task_id))
-                await self._run_task_inner(params, is_new_task=is_new_task)
+                await self._run_task_inner(
+                    params, is_new_task=is_new_task, request_context=request_context
+                )
         else:
-            await self._run_task_inner(params, is_new_task=is_new_task)
+            await self._run_task_inner(
+                params, is_new_task=is_new_task, request_context=request_context
+            )
 
     async def _run_task_inner(
-        self, params: MessageSendParams, *, is_new_task: bool = False
+        self,
+        params: MessageSendParams,
+        *,
+        is_new_task: bool = False,
+        request_context: dict[str, Any] | None = None,
     ) -> None:
         """Inner task execution — called with or without lock."""
         message = params.message
@@ -196,7 +214,12 @@ class WorkerAdapter:
                     await self._mark_canceled(self._storage, self._emitter, task_id, context_id)
                 return
 
-            ctx = await self._context_factory.build(message, cancel_event, is_new_task=is_new_task)
+            ctx = await self._context_factory.build(
+                message,
+                cancel_event,
+                is_new_task=is_new_task,
+                request_context=request_context,
+            )
 
             try:
                 working_version = await emitter.update_task(task_id, state=TaskState.working)

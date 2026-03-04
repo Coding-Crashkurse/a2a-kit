@@ -31,6 +31,7 @@ from a2akit.worker import Worker, WorkerAdapter
 
 if TYPE_CHECKING:
     from a2akit.agent_card import AgentCardConfig
+    from a2akit.middleware import A2AMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class A2AServer:
         *,
         worker: Worker,
         agent_card: AgentCardConfig,
+        middlewares: list[A2AMiddleware] | None = None,
         storage: str | Storage = "memory",
         broker: str | Broker = "memory",
         event_bus: str | EventBus = "memory",
@@ -53,6 +55,7 @@ class A2AServer:
         """Store configuration for lazy initialization at startup."""
         self._worker = worker
         self._card_config = agent_card
+        self._middlewares = middlewares or []
         self._storage_spec = storage
         self._broker_spec = broker
         self._event_bus_spec = event_bus
@@ -118,6 +121,7 @@ class A2AServer:
             app.state.storage = storage
             app.state.broker = broker
             app.state.event_bus = event_bus
+            app.state.middlewares = server._middlewares
 
             async with storage, broker, event_bus, adapter.run():
                 try:
@@ -127,6 +131,7 @@ class A2AServer:
                     del app.state.broker
                     del app.state.storage
                     del app.state.event_bus
+                    del app.state.middlewares
 
         fastapi_kwargs.setdefault("title", self._card_config.name)
         fastapi_kwargs.setdefault("version", self._card_config.version)

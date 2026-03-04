@@ -34,9 +34,7 @@ async def process_node(state: FileProcessingState):
             succeeded += 1
             writer({"type": "done", "file": name, "index": i, "total": TOTAL})
 
-    writer(
-        {"type": "summary", "succeeded": succeeded, "failed": failed, "total": TOTAL}
-    )
+    writer({"type": "summary", "succeeded": succeeded, "failed": failed, "total": TOTAL})
     return {}
 
 

@@ -62,6 +62,7 @@ curl -X POST http://localhost:8000/v1/message:send \
 ## Features
 
 - **One-liner setup** — `A2AServer` wires storage, broker, event bus, and endpoints
+- **Middleware** — `A2AMiddleware` pipeline for auth extraction, header injection, payload sanitization, and logging
 - **Streaming** — word-by-word artifact streaming via SSE
 - **Cancellation** — cooperative and force-cancel with timeout fallback
 - **Multi-turn** — `request_input()` / `request_auth()` for conversational flows
@@ -78,6 +79,8 @@ for development.
 ```mermaid
 graph TD
     HTTP["HTTP Server\n(FastAPI + SSE)"]
+    MW["Middleware\n(before / after dispatch)"]
+    ENV["RequestEnvelope\n(params + context)"]
     TM["TaskManager\n(coordinates)"]
     WA["WorkerAdapter\n(lifecycle)"]
     EE["EventEmitter\n(facade)"]
@@ -88,7 +91,10 @@ graph TD
     W["Worker\n(your code)"]
     TC["TaskContext\n(execution API)"]
 
-    HTTP -->|requests / responses| TM
+    HTTP -->|raw request| MW
+    MW -->|"mutate envelope\n(extract secrets, headers)"| ENV
+    ENV -->|"params (persisted)"| TM
+    ENV -.->|"context (transient)"| B
     TM -->|schedules tasks| B
     TM -.->|reads / writes| S
     TM -.->|subscribes| EB
@@ -114,6 +120,12 @@ cleanup.
 events (EventBus) without knowing about either directly. Storage writes are authoritative;
 EventBus is best-effort.
 
+**Middleware** intercepts requests at the HTTP boundary. `before_dispatch` runs before
+TaskManager sees the request — extract secrets from `message.metadata`, read HTTP headers,
+sanitize payloads. `after_dispatch` runs after TaskManager returns — log timing, emit
+metrics, clean up. Transient data lives in `RequestEnvelope.context` and flows through
+the Broker to the Worker via `ctx.request_context`, but is **never persisted** in Storage.
+
 **Pluggable backends:** Swap `Storage`, `Broker`, `EventBus`, and `CancelRegistry`
 independently — e.g. PostgreSQL storage + Redis broker + Redis event bus. All backends
 implement their respective ABC.
@@ -133,7 +145,8 @@ implement their respective ABC.
 | `ctx.task_id` | Current task UUID |
 | `ctx.context_id` | Conversation / context identifier |
 | `ctx.message_id` | ID of the triggering message |
-| `ctx.metadata` | Arbitrary metadata from the request |
+| `ctx.metadata` | Arbitrary metadata from the request (persisted) |
+| `ctx.request_context` | Transient data from middleware (never persisted) |
 | `ctx.is_cancelled` | Check if cancellation was requested |
 | `ctx.turn_ended` | Whether a terminal method was called |
 | `ctx.history` | Previous messages in this task (`list[HistoryMessage]`) |
@@ -206,6 +219,51 @@ server = A2AServer(
 app = server.as_fastapi_app()
 ```
 
+## Middleware
+
+Middleware operates on a `RequestEnvelope` at the HTTP boundary, separating
+transient request data (tokens, headers) from the persisted A2A protocol payload.
+
+```python
+from a2akit import A2AMiddleware, A2AServer, AgentCardConfig, RequestEnvelope, TaskContext, Worker
+from fastapi import Request
+
+
+class SecretExtractor(A2AMiddleware):
+    """Move sensitive keys from message.metadata into transient context."""
+
+    SECRET_KEYS = {"user_token", "api_key", "auth_token"}
+
+    async def before_dispatch(self, envelope: RequestEnvelope, request: Request) -> None:
+        msg_meta = envelope.params.message.metadata or {}
+        for key in self.SECRET_KEYS & msg_meta.keys():
+            envelope.context[key] = msg_meta.pop(key)
+        if auth := request.headers.get("Authorization"):
+            envelope.context["auth_header"] = auth
+
+
+class MyWorker(Worker):
+    async def handle(self, ctx: TaskContext) -> None:
+        # Transient — never in Storage
+        token = ctx.request_context.get("user_token")
+        # Persisted — from message.metadata
+        trace_id = ctx.metadata.get("trace_id")
+
+        result = await call_external_api(token)
+        await ctx.complete(f"Result: {result}")
+
+
+server = A2AServer(
+    worker=MyWorker(),
+    agent_card=AgentCardConfig(name="My Agent", description="...", version="0.1.0"),
+    middlewares=[SecretExtractor()],
+)
+app = server.as_fastapi_app()
+```
+
+**Execution order:** `before_dispatch` runs in registration order;
+`after_dispatch` runs in reverse (like Python context managers).
+
 ## A2AServer Configuration
 
 ```python
@@ -216,12 +274,13 @@ server = A2AServer(
         description="What your agent does.",
         version="0.1.0",
     ),
-    storage="memory",             # or pass a Storage instance
-    broker="memory",              # or pass a Broker instance
-    event_bus="memory",           # or pass an EventBus instance
-    cancel_registry=None,         # or pass a CancelRegistry instance
-    blocking_timeout_s=30.0,      # timeout for blocking requests
-    max_concurrent_tasks=None,    # limit parallel task execution
+    middlewares=[SecretExtractor()],  # optional middleware pipeline
+    storage="memory",                # or pass a Storage instance
+    broker="memory",                 # or pass a Broker instance
+    event_bus="memory",              # or pass an EventBus instance
+    cancel_registry=None,            # or pass a CancelRegistry instance
+    blocking_timeout_s=30.0,         # timeout for blocking requests
+    max_concurrent_tasks=None,       # limit parallel task execution
 )
 app = server.as_fastapi_app()
 ```
@@ -249,8 +308,9 @@ Planned features for upcoming releases. Priorities may shift based on feedback.
 
 | Feature | Target |
 |---|---|
-| Task middleware / hooks | v0.1.0 |
-| Lifecycle hooks + dependency injection | v0.1.0 |
+| ~~Request middleware~~ | ~~v0.1.0~~ done |
+| Lifecycle hooks (on_task_completed, etc.) | v0.1.0 |
+| Dependency injection | v0.1.0 |
 | Documentation website | v0.1.0 |
 | Redis EventBus | v0.2.0 |
 | Redis Broker | v0.2.0 |

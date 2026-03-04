@@ -9,6 +9,7 @@ from a2akit.broker import (
 )
 from a2akit.event_bus import EventBus, InMemoryEventBus
 from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
+from a2akit.middleware import A2AMiddleware, RequestEnvelope
 from a2akit.server import A2AServer
 from a2akit.storage import (
     ArtifactWrite,
@@ -26,6 +27,7 @@ from a2akit.task_manager import TaskManager
 from a2akit.worker import FileInfo, TaskContext, Worker
 
 __all__ = [
+    "A2AMiddleware",
     "A2AServer",
     "AgentCardConfig",
     "ArtifactWrite",
@@ -43,6 +45,7 @@ __all__ = [
     "InMemoryStorage",
     "ListTasksQuery",
     "ListTasksResult",
+    "RequestEnvelope",
     "SkillConfig",
     "Storage",
     "TaskContext",

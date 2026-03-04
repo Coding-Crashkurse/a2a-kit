@@ -167,7 +167,11 @@ class TaskManager:
             return TaskState.submitted
         return None
 
-    async def send_message(self, params: MessageSendParams) -> Task | Message:
+    async def send_message(
+        self,
+        params: MessageSendParams,
+        request_context: dict[str, Any] | None = None,
+    ) -> Task | Message:
         """Submit a task and optionally block until completion.
 
         Returns a ``Message`` when the worker used ``reply_directly()``
@@ -188,7 +192,13 @@ class TaskManager:
             # events published between broker.run_task and subscribe would
             # be lost if we subscribed after.
             async with self.event_bus.subscribe(task.id) as sub:
-                self._track_background(self.broker.run_task(params, is_new_task=is_new))
+                self._track_background(
+                    self.broker.run_task(
+                        params,
+                        is_new_task=is_new,
+                        request_context=request_context,
+                    )
+                )
 
                 try:
                     async with asyncio.timeout(self.default_blocking_timeout_s):
@@ -201,7 +211,13 @@ class TaskManager:
                     logger.info("Blocking wait timed out for task %s", task.id)
         else:
             # Non-blocking: just enqueue and return immediately
-            self._track_background(self.broker.run_task(params, is_new_task=is_new))
+            self._track_background(
+                self.broker.run_task(
+                    params,
+                    is_new_task=is_new,
+                    request_context=request_context,
+                )
+            )
 
         if direct_message is not None:
             return direct_message
@@ -214,7 +230,11 @@ class TaskManager:
                 return reply
         return latest or task
 
-    async def stream_message(self, params: MessageSendParams) -> AsyncGenerator[StreamEvent, None]:
+    async def stream_message(
+        self,
+        params: MessageSendParams,
+        request_context: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Submit a task, yield initial snapshot, then stream live events.
 
         Subscribes to the event bus BEFORE starting the broker to prevent
@@ -239,7 +259,13 @@ class TaskManager:
         # Subscribe BEFORE starting broker — prevents race condition
         # where events published between run_task and subscribe are lost.
         async with self.event_bus.subscribe(task.id) as sub:
-            self._track_background(self.broker.run_task(params, is_new_task=is_new))
+            self._track_background(
+                self.broker.run_task(
+                    params,
+                    is_new_task=is_new,
+                    request_context=request_context,
+                )
+            )
 
             async for ev in sub:
                 yield ev

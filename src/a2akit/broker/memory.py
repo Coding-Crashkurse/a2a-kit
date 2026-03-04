@@ -129,10 +129,23 @@ class InMemoryBroker(Broker):
         if self._aexit_stack is not None:
             await self._aexit_stack.__aexit__(exc_type, exc_value, traceback)
 
-    async def run_task(self, params: MessageSendParams, *, is_new_task: bool = False) -> None:
+    async def run_task(
+        self,
+        params: MessageSendParams,
+        *,
+        is_new_task: bool = False,
+        request_context: dict[str, Any] | None = None,
+    ) -> None:
         """Enqueue a run-task operation."""
         await self._ops_write.send(
-            _EnqueuedOp(_RunTask(operation="run", params=params, is_new_task=is_new_task))
+            _EnqueuedOp(
+                _RunTask(
+                    operation="run",
+                    params=params,
+                    is_new_task=is_new_task,
+                    request_context=request_context or {},
+                )
+            )
         )
 
     async def shutdown(self) -> None:
