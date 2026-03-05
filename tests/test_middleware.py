@@ -21,13 +21,11 @@ if TYPE_CHECKING:
     from fastapi import Request
 
 
-
 class EchoContextWorker(Worker):
     """Worker that echoes request_context back as the completion text."""
 
     async def handle(self, ctx: TaskContext) -> None:
         await ctx.complete(repr(ctx.request_context))
-
 
 
 class InjectHeaderMiddleware(A2AMiddleware):
@@ -73,7 +71,6 @@ class OrderTracker(A2AMiddleware):
         envelope.context.setdefault("order", []).append(f"after:{self.name}")
 
 
-
 def _make_app(worker: Worker, middlewares: list[A2AMiddleware] | None = None):
     server = A2AServer(
         worker=worker,
@@ -98,7 +95,6 @@ def _send_body(text: str = "hello", metadata: dict[str, Any] | None = None) -> d
     if metadata:
         msg["metadata"] = metadata
     return {"message": msg, "configuration": {"blocking": True}}
-
 
 
 @pytest.mark.asyncio
