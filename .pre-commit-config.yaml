@@ -20,3 +20,13 @@ repos:
           - anyio>=4.4
         args: [--config-file, pyproject.toml]
         pass_filenames: true
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -x -q --no-cov -m "not slow"
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
