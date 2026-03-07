@@ -217,6 +217,39 @@ async def storage():
     return InMemoryStorage()
 
 
+@pytest.fixture(params=["sqlite", "postgres"])
+async def sql_storage(request):
+    """Parametrized fixture — runs against both SQL backends."""
+    if request.param == "sqlite":
+        try:
+            from a2akit.storage.sqlite import SQLiteStorage
+        except ImportError:
+            pytest.skip("aiosqlite not installed")
+
+        s = SQLiteStorage("sqlite+aiosqlite://")
+        async with s:
+            yield s
+    else:
+        import os
+
+        url = os.environ.get("A2AKIT_TEST_POSTGRES_URL")
+        if not url:
+            pytest.skip("PostgreSQL not configured (set A2AKIT_TEST_POSTGRES_URL)")
+
+        try:
+            from a2akit.storage._sql_base import contexts_table, tasks_table
+            from a2akit.storage.postgres import PostgreSQLStorage
+        except ImportError:
+            pytest.skip("asyncpg not installed")
+
+        s = PostgreSQLStorage(url)
+        async with s:
+            yield s
+            async with s._get_session() as session, session.begin():
+                await session.execute(tasks_table.delete())
+                await session.execute(contexts_table.delete())
+
+
 @pytest.fixture
 async def broker():
     """Isolated InMemoryBroker instance (entered)."""

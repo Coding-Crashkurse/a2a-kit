@@ -18,6 +18,7 @@ repos:
           - a2a-sdk>=0.3
           - uvicorn>=0.29
           - anyio>=4.4
+          - sqlalchemy>=2.0
         args: [--config-file, pyproject.toml]
         pass_filenames: true
 

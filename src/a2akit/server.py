@@ -93,7 +93,21 @@ class A2AServer:
             return self._storage_spec
         if self._storage_spec == "memory":
             return InMemoryStorage()
-        msg = f"Unknown storage backend: {self._storage_spec!r}. Use 'memory' or pass a Storage instance."
+        if isinstance(self._storage_spec, str):
+            if self._storage_spec.startswith("postgresql"):
+                from a2akit.storage.postgres import PostgreSQLStorage
+
+                return PostgreSQLStorage(self._storage_spec)
+            if self._storage_spec.startswith("sqlite"):
+                from a2akit.storage.sqlite import SQLiteStorage
+
+                return SQLiteStorage(self._storage_spec)
+        msg = (
+            f"Unknown storage backend: {self._storage_spec!r}. "
+            "Use 'memory', a connection string "
+            "('postgresql+asyncpg://...', 'sqlite+aiosqlite:///...'), "
+            "or pass a Storage instance."
+        )
         raise ValueError(msg)
 
     def _build_broker(self) -> Broker:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "a2akit"
-version = "0.0.3"
+version = "0.0.4"
 description = "A2A agent framework in one import."
 readme = "README.md"
 license = "MIT"
@@ -31,20 +31,27 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.13.1",
     "fastapi>=0.135.1",
-    "sse-starlette>=3.3.2",
 ]
 
 [project.optional-dependencies]
 langgraph = ["langgraph>=0.2.0"]
+postgres = ["sqlalchemy[asyncio]>=2.0", "asyncpg>=0.29"]
+sqlite = ["sqlalchemy[asyncio]>=2.0", "aiosqlite>=0.20"]
+sql = ["sqlalchemy[asyncio]>=2.0"]
 
 [project.urls]
 Homepage = "https://github.com/markuslang1987/a2akit"
-Documentation = "https://github.com/markuslang1987/a2akit#readme"
+Documentation = "https://markuslang1987.github.io/a2akit/"
 Repository = "https://github.com/markuslang1987/a2akit"
 Changelog = "https://github.com/markuslang1987/a2akit/blob/main/CHANGELOG.md"
 Issues = "https://github.com/markuslang1987/a2akit/issues"
 
 [dependency-groups]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.25",
+    "pymdown-extensions>=10.7",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -117,7 +124,7 @@ show_error_codes = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["a2a_sdk.*", "uvicorn.*", "pytest.*", "asgi_lifespan.*", "httpx.*", "langgraph.*"]
+module = ["a2a_sdk.*", "uvicorn.*", "pytest.*", "asgi_lifespan.*", "httpx.*", "langgraph.*", "asyncpg.*", "aiosqlite.*", "sqlalchemy.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -1,0 +1,107 @@
+site_name: a2akit
+site_description: A2A agent framework in one import.
+site_url: https://markuslang1987.github.io/a2akit/
+repo_url: https://github.com/markuslang1987/a2akit
+repo_name: markuslang1987/a2akit
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+            docstring_style: google
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - pymdownx.snippets
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/markuslang1987/a2akit
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/a2akit/
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Concepts:
+    - Architecture: concepts/architecture.md
+    - Task Lifecycle: concepts/task-lifecycle.md
+    - Worker Model: concepts/worker-model.md
+  - Guides:
+    - Streaming: guides/streaming.md
+    - Middleware: guides/middleware.md
+    - Dependency Injection: guides/dependency-injection.md
+    - Lifecycle Hooks: guides/hooks.md
+    - Cancellation: guides/cancellation.md
+    - Multi-Turn Conversations: guides/multi-turn.md
+    - LangGraph Integration: guides/langgraph.md
+  - API Reference:
+    - TaskContext: reference/taskcontext.md
+    - A2AServer & Config: reference/server.md
+    - Storage: reference/storage.md
+    - Broker: reference/broker.md
+    - EventBus: reference/eventbus.md
+    - Endpoints: reference/endpoints.md
+  - Configuration: configuration.md
+  - Examples:
+    - Echo: examples/echo.md
+    - Streaming: examples/streaming.md
+    - Dependency Injection: examples/dependency-injection.md
+    - Middleware: examples/middleware-secret.md
+    - Hook Printer: examples/hook-printer.md
+    - LangGraph Worker: examples/langgraph-worker.md
