@@ -61,13 +61,13 @@ uvicorn my_agent:app --reload
 - **Pluggable backends** — PostgreSQL, SQLite, and more (Redis, RabbitMQ coming soon)
 - **Type-safe** — full type hints, `py.typed` marker, PEP 561 compliant
 
-📖 **[Full Documentation](https://markuslang1987.github.io/a2akit/)**
+📖 **[Full Documentation](https://coding-crashkurse.github.io/a2a-kit/)**
 
 ## Links
 
-- [PyPI](https://pypi.org/project/a2akit/)
-- [GitHub](https://github.com/markuslang1987/a2akit)
-- [Changelog](https://github.com/markuslang1987/a2akit/blob/main/CHANGELOG.md)
+- [PyPI](https://pypi.org/project/a2a-kit/)
+- [GitHub](https://github.com/Coding-Crashkurse/a2a-kit)
+- [Changelog](https://github.com/Coding-Crashkurse/a2a-kit/blob/main/CHANGELOG.md)
 
 ## License
 
