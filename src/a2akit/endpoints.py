@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING
 
 from a2a.types import (
@@ -21,7 +22,7 @@ from a2akit.schema import DirectReply, StreamEvent
 from a2akit.storage.base import ListTasksQuery, TaskNotCancelableError, TaskNotFoundError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, AsyncIterator
+    from collections.abc import AsyncIterator
 
     from a2akit.task_manager import TaskManager
 
