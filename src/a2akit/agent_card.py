@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from a2a.types import (
     AgentCapabilities,
@@ -47,6 +47,8 @@ class AgentCardConfig(BaseModel):
     push_notifications: bool = False
     supports_extended_card: bool = False
 
+    protocol: Literal["jsonrpc", "http+json"] = "jsonrpc"
+
     input_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
     output_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
 
@@ -71,17 +73,36 @@ def _to_agent_extension(ext: ExtensionConfig) -> AgentExtension:
     )
 
 
+def validate_protocol(protocol: str) -> str:
+    """Validate the protocol string, raising ValueError for unsupported values."""
+    supported = ["http+json", "jsonrpc"]
+    if protocol == "grpc":
+        msg = f"Protocol 'grpc' is not yet supported by a2akit. Supported protocols: {supported}"
+        raise ValueError(msg)
+    if protocol not in supported:
+        msg = f"Unknown protocol {protocol!r}. Supported protocols: {supported}"
+        raise ValueError(msg)
+    return protocol
+
+
 def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
     """Build a full AgentCard from user config and the runtime base URL."""
-    agent_url = f"{base_url.rstrip('/')}/v1"
+    stripped = base_url.rstrip("/")
+    if config.protocol == "jsonrpc":
+        agent_url = stripped
+        transport = TransportProtocol.jsonrpc
+    else:
+        agent_url = f"{stripped}/v1"
+        transport = TransportProtocol.http_json
+
     return AgentCard(
         protocol_version=config.protocol_version,
         name=config.name,
         description=config.description,
         url=agent_url,
-        preferred_transport=TransportProtocol.http_json,
+        preferred_transport=transport,
         additional_interfaces=[
-            AgentInterface(url=agent_url, transport=TransportProtocol.http_json),
+            AgentInterface(url=agent_url, transport=transport),
         ],
         version=config.version,
         capabilities=AgentCapabilities(

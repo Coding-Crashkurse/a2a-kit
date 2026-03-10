@@ -197,7 +197,9 @@ def _make_send_body(text: str = "hello") -> dict:
 
 
 def _card() -> AgentCardConfig:
-    return AgentCardConfig(name="Test", description="DI test", version="0.0.1")
+    return AgentCardConfig(
+        name="Test", description="DI test", version="0.0.1", protocol="http+json"
+    )
 
 
 class TestIntegration:

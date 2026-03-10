@@ -107,6 +107,7 @@ async def _make_hooked_client(
             name="Test Agent",
             description="Hook test agent",
             version="0.0.1",
+            protocol="http+json",
         ),
         hooks=hooks,
     )

@@ -78,6 +78,7 @@ def _make_app(worker: Worker, middlewares: list[A2AMiddleware] | None = None):
             name="Middleware Test",
             description="Tests for middleware pipeline",
             version="0.0.1",
+            protocol="http+json",
         ),
         middlewares=middlewares,
     )

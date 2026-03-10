@@ -16,7 +16,7 @@ async def test_build_agent_card_basic():
     assert card.name == "Test"
     assert card.description == "A test agent"
     assert card.version == "1.0.0"
-    assert card.url == "http://localhost:8000/v1"
+    assert card.url == "http://localhost:8000"
     assert card.protocol_version == "0.3.0"
 
 

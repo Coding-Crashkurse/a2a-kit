@@ -173,6 +173,7 @@ def _make_app(worker: Worker, **server_kwargs) -> FastAPI:
             name="Test Agent",
             description="Test agent for unit tests",
             version="0.0.1",
+            protocol="http+json",
         ),
         **server_kwargs,
     )

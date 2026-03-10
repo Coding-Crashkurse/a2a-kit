@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from a2akit.agent_card import validate_protocol
 from a2akit.broker import (
     Broker,
     CancelRegistry,
@@ -21,6 +22,7 @@ from a2akit.endpoints import build_a2a_router, build_discovery_router
 from a2akit.event_bus import EventBus, InMemoryEventBus
 from a2akit.event_emitter import DefaultEventEmitter
 from a2akit.hooks import HookableEmitter, LifecycleHooks
+from a2akit.jsonrpc import build_jsonrpc_router
 from a2akit.storage import (
     ContextMismatchError,
     InMemoryStorage,
@@ -63,6 +65,7 @@ class A2AServer:
         dependencies: dict[Any, Any] | None = None,
     ) -> None:
         """Store configuration for lazy initialization at startup."""
+        validate_protocol(agent_card.protocol)
         s = settings or get_settings()
         self._worker = worker
         self._card_config = agent_card
@@ -188,7 +191,13 @@ class A2AServer:
 
         app = FastAPI(lifespan=lifespan, **fastapi_kwargs)
         _register_exception_handlers(app)
-        app.include_router(build_a2a_router())
+
+        protocol = self._card_config.protocol
+        if protocol == "jsonrpc":
+            app.include_router(build_jsonrpc_router())
+        elif protocol == "http+json":
+            app.include_router(build_a2a_router())
+
         app.include_router(build_discovery_router(self._card_config))
 
         return app

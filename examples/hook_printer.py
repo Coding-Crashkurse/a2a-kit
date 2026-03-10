@@ -82,6 +82,7 @@ server = A2AServer(
         name="Hook Printer",
         description="Demonstrates lifecycle hooks by printing every state change",
         version="0.1.0",
+        protocol="http+json",
     ),
     hooks=hooks,
 )

@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.5] — 2026-03-10
+
+### Added
+- **JSON-RPC 2.0 protocol binding** — default A2A v0.3 transport.
+  - Single `POST /` endpoint with full method dispatch (`message/send`, `message/sendStream`, `tasks/get`, `tasks/cancel`, `tasks/resubscribe`).
+  - Push notification config stubs return `-32003 PushNotificationNotSupported`.
+  - Standard JSON-RPC error codes (`-32700`, `-32600`, `-32601`, `-32602`, `-32603`) and A2A-specific codes (`-32001` – `-32006`).
+  - SSE streaming with JSON-RPC envelope format (`data: {"jsonrpc":"2.0","id":...,"result":{...}}`).
+  - Full middleware pipeline integration (same `A2AMiddleware` as REST).
+  - Task sanitization (strip `_`-prefixed metadata) on all responses.
+- `protocol` field on `AgentCardConfig` — `Literal["jsonrpc", "http+json"]`, defaults to `"jsonrpc"`.
+- `validate_protocol()` function — rejects `"grpc"` and unknown values at construction time.
+- Protocol-conditional router mounting in `A2AServer.as_fastapi_app()`.
+
+### Changed
+- REST (`http+json`) transport is now opt-in via `protocol="http+json"`.
+- Agent card `url` and `preferred_transport` are derived from the configured protocol.
+
+## [0.0.4] — 2026-03-07
+
+### Added
+- **PostgreSQL storage backend** via `PostgreSQLStorage` (connection string: `postgresql+asyncpg://...`).
+- **SQLite storage backend** via `SQLiteStorage` (connection string: `sqlite+aiosqlite:///...`).
+- MkDocs documentation site with Material theme.
+- CI docs deployment workflow.
+
+## [0.0.3] — 2026-03-07
+
+### Changed
+- Upgraded FastAPI dependency.
+- Improved SSE endpoint robustness (setup dependencies for proper error handling).
+- Pre-commit hook configuration.
+- CI coverage threshold lowered to 80%.
+
 ## [0.0.2] — 2026-03-05
 
 ### Added

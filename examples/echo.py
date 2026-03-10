@@ -14,7 +14,7 @@ class EchoWorker(Worker):
 server = A2AServer(
     worker=EchoWorker(),
     agent_card=AgentCardConfig(
-        name="Echo", description="Echoes input ssdasdasda", version="0.1.0"
+        name="Echo", description="Echoes your input back.", version="0.1.0"
     ),
 )
 app = server.as_fastapi_app()
