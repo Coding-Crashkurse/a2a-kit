@@ -6,7 +6,7 @@ from typing import TypedDict
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 
-from a2akit import A2AServer, AgentCardConfig, TaskContext, Worker
+from a2akit import A2AServer, AgentCardConfig, CapabilitiesConfig, TaskContext, Worker
 
 TOTAL = 10
 BROKEN = {4, 7}
@@ -53,28 +53,45 @@ class LangGraphWorker(Worker):
     async def handle(self, ctx: TaskContext) -> None:
         """Execute the graph and forward custom stream events as A2A artifacts."""
         await ctx.send_status("Starting file processing pipeline...")
-        lines: list[str] = []
+        chunk_index = 0
 
         async for _mode, chunk in graph.astream({}, stream_mode=["custom"]):
             evt_type = chunk.get("type", "")
 
             if evt_type == "done":
-                line = f"[{chunk['index']}/{chunk['total']}] {chunk['file']}"
-                lines.append(line)
-                await ctx.send_status(line)
+                line = f"[{chunk['index']}/{chunk['total']}] {chunk['file']}\n"
+                await ctx.send_status(line.strip())
+                await ctx.emit_text_artifact(
+                    text=line,
+                    artifact_id="log",
+                    append=(chunk_index > 0),
+                )
+                chunk_index += 1
 
             elif evt_type == "error":
-                line = f"[{chunk['index']}/{chunk['total']}] {chunk['file']} - FAILED"
-                lines.append(line)
-                await ctx.send_status(line)
+                line = f"[{chunk['index']}/{chunk['total']}] {chunk['file']} - FAILED\n"
+                await ctx.send_status(line.strip())
+                await ctx.emit_text_artifact(
+                    text=line,
+                    artifact_id="log",
+                    append=(chunk_index > 0),
+                )
+                chunk_index += 1
 
             elif evt_type == "summary":
-                lines.append(
+                summary = (
                     f"Summary: {chunk['succeeded']}/{chunk['total']} succeeded, "
-                    f"{chunk['failed']} failed"
+                    f"{chunk['failed']} failed\n"
                 )
+                await ctx.emit_text_artifact(
+                    text=summary,
+                    artifact_id="log",
+                    append=(chunk_index > 0),
+                    last_chunk=True,
+                )
+                chunk_index += 1
 
-        await ctx.complete("\n".join(lines))
+        await ctx.complete()
 
 
 server = A2AServer(
@@ -83,6 +100,7 @@ server = A2AServer(
         name="File Processor",
         description="LangGraph pipeline that processes files with streaming status",
         version="0.1.0",
+        capabilities=CapabilitiesConfig(streaming=True),
     ),
 )
 app = server.as_fastapi_app()

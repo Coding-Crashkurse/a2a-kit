@@ -470,7 +470,7 @@ async def test_on_background_done_logs_exception():
 
 async def test_stream_message_with_history_length():
     """stream_message respects history_length configuration."""
-    app = _make_app(EchoWorker())
+    app = _make_app(EchoWorker(), streaming=True)
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

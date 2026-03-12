@@ -62,6 +62,9 @@ Submit a message and return the task (or a direct message for `reply_directly()`
 
 ## POST `/v1/message:stream`
 
+!!! note "Requires `streaming` capability"
+    This endpoint returns `400` with error code `-32004` if the agent has not enabled `CapabilitiesConfig(streaming=True)`.
+
 Submit a message and receive SSE events. The stream contains:
 
 1. Initial `Task` snapshot
@@ -126,6 +129,9 @@ Cancel a task. Signals the CancelRegistry and starts a force-cancel timer.
 
 ## POST `/v1/tasks/{task_id}:subscribe`
 
+!!! note "Requires `streaming` capability"
+    This endpoint returns `400` with error code `-32004` if the agent has not enabled `CapabilitiesConfig(streaming=True)`.
+
 Subscribe to updates for an existing task via SSE. Yields the current task state first, then streams live events.
 
 Supports `Last-Event-ID` header for reconnection (backends with replay support).
@@ -171,6 +177,7 @@ curl -H "A2A-Version: 0.3.0" http://localhost:8000/v1/message:send ...
 |-------------|-----------|-------------|
 | 400 | -32600 | Invalid request (missing messageId) |
 | 400 | -32602 | Context mismatch |
+| 400 | -32004 | Streaming not supported (capability not enabled) |
 | 400 | -32009 | Unsupported A2A version |
 | 404 | -32001 | Task not found |
 | 409 | -32002 | Task not cancelable |

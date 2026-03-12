@@ -135,7 +135,7 @@ async def test_exception_handler_not_accepting_messages():
 
 async def test_exception_handler_unsupported_operation():
     """UnsupportedOperationError is caught and returns 400."""
-    app = _make_app(EchoWorker())
+    app = _make_app(EchoWorker(), streaming=True)
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

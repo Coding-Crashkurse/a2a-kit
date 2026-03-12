@@ -48,9 +48,24 @@ app = server.as_fastapi_app()
 uvicorn my_agent:app --reload
 ```
 
+## Client
+
+```python
+from a2akit import A2AClient
+
+async with A2AClient("http://localhost:8000") as client:
+    result = await client.send("Hello, agent!")
+    print(result.text)
+
+    async for chunk in client.stream_text("Stream me"):
+        print(chunk, end="")
+```
+
 ## Features
 
 - **One-liner setup** — `A2AServer` wires storage, broker, event bus, and endpoints
+- **A2AClient** — auto-discovers agents, supports send/stream/cancel/subscribe
+- **Capabilities** — explicit opt-in for streaming, enforced on server and client
 - **Streaming** — word-by-word artifact streaming via SSE
 - **Cancellation** — cooperative and force-cancel with timeout fallback
 - **Multi-turn** — `request_input()` / `request_auth()` for conversational flows

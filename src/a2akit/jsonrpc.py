@@ -17,6 +17,7 @@ from a2akit.middleware import A2AMiddleware, RequestEnvelope
 from a2akit.schema import DirectReply
 from a2akit.storage import ContextMismatchError, TaskNotAcceptingMessagesError
 from a2akit.storage.base import (
+    ListTasksQuery,
     TaskNotCancelableError,
     TaskNotFoundError,
     TaskTerminalStateError,
@@ -132,12 +133,14 @@ def build_jsonrpc_router() -> APIRouter:
             "message/send": _handle_message_send,
             "message/sendStream": _handle_message_send_stream,
             "tasks/get": _handle_tasks_get,
+            "tasks/list": _handle_tasks_list,
             "tasks/cancel": _handle_tasks_cancel,
             "tasks/resubscribe": _handle_tasks_resubscribe,
             "tasks/pushNotificationConfig/set": _handle_push_stub,
             "tasks/pushNotificationConfig/get": _handle_push_stub,
             "tasks/pushNotificationConfig/list": _handle_push_stub,
             "tasks/pushNotificationConfig/delete": _handle_push_stub,
+            "health": _handle_health,
         }
 
         handler = dispatch.get(method)
@@ -182,10 +185,23 @@ async def _handle_message_send(
         return _map_exception_to_error(req_id, exc)
 
 
+def _check_streaming(request: Request, req_id: Any) -> JSONResponse | None:
+    """Return an error response if streaming is not enabled, else None."""
+    caps = getattr(request.app.state, "capabilities", None)
+    if caps is not None and not caps.streaming:
+        return _error_response(
+            req_id, UNSUPPORTED_OPERATION, "Streaming is not supported by this agent"
+        )
+    return None
+
+
 async def _handle_message_send_stream(
     request: Request, req_id: Any, params: dict[str, Any]
 ) -> Any:
     """Handle message/sendStream — returns SSE."""
+    err = _check_streaming(request, req_id)
+    if err is not None:
+        return err
     try:
         send_params = MessageSendParams.model_validate(params)
     except (ValidationError, Exception):
@@ -238,6 +254,36 @@ async def _handle_tasks_get(request: Request, req_id: Any, params: dict[str, Any
         return _map_exception_to_error(req_id, exc)
 
 
+async def _handle_tasks_list(
+    request: Request, req_id: Any, params: dict[str, Any]
+) -> JSONResponse:
+    """Handle tasks/list."""
+    tm = _get_tm(request)
+
+    try:
+        query = ListTasksQuery(
+            context_id=params.get("contextId"),
+            status=params.get("status"),
+            page_size=params.get("pageSize", 50),
+            page_token=params.get("pageToken"),
+            history_length=params.get("historyLength"),
+            status_timestamp_after=params.get("statusTimestampAfter"),
+            include_artifacts=params.get("includeArtifacts", False),
+        )
+    except (ValidationError, Exception):
+        return _error_response(req_id, INVALID_PARAMS, "Invalid params for tasks/list")
+
+    try:
+        result = await tm.list_tasks(query)
+        result.tasks = [_sanitize_task_for_client(t) for t in result.tasks]
+        return _result_response(
+            req_id,
+            json.loads(result.model_dump_json(by_alias=True, exclude_none=True)),
+        )
+    except Exception as exc:
+        return _map_exception_to_error(req_id, exc)
+
+
 async def _handle_tasks_cancel(
     request: Request, req_id: Any, params: dict[str, Any]
 ) -> JSONResponse:
@@ -257,6 +303,9 @@ async def _handle_tasks_cancel(
 
 async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[str, Any]) -> Any:
     """Handle tasks/resubscribe — returns SSE."""
+    err = _check_streaming(request, req_id)
+    if err is not None:
+        return err
     task_id = params.get("id")
     if not task_id:
         return _error_response(req_id, INVALID_PARAMS, "Missing 'id' in params")
@@ -279,6 +328,11 @@ async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[
             logger.exception("JSON-RPC SSE resubscribe stream aborted")
 
     return StreamingResponse(_sse_generator(), media_type="text/event-stream")
+
+
+async def _handle_health(_request: Request, req_id: Any, _params: dict[str, Any]) -> JSONResponse:
+    """Handle health check."""
+    return _result_response(req_id, {"status": "ok"})
 
 
 async def _handle_push_stub(

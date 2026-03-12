@@ -6,7 +6,7 @@ a2akit supports real-time streaming of artifacts and status updates via Server-S
 
 ```python
 import asyncio
-from a2akit import A2AServer, AgentCardConfig, TaskContext, Worker
+from a2akit import A2AServer, AgentCardConfig, CapabilitiesConfig, TaskContext, Worker
 
 
 class StreamingWorker(Worker):
@@ -33,6 +33,7 @@ server = A2AServer(
         name="Streamer",
         description="Word-by-word streaming",
         version="0.1.0",
+        capabilities=CapabilitiesConfig(streaming=True),  # (6)!
     ),
 )
 app = server.as_fastapi_app()
@@ -43,6 +44,7 @@ app = server.as_fastapi_app()
 3. `append=True` means this chunk extends the existing artifact rather than replacing it.
 4. `last_chunk=True` signals that this artifact is complete.
 5. `complete()` without text marks the task as completed without adding another artifact.
+6. Streaming must be explicitly enabled via `CapabilitiesConfig(streaming=True)`. Without this, the server rejects streaming requests.
 
 ## Streaming Endpoints
 

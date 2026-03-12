@@ -99,7 +99,7 @@ async def test_cancel_endpoint_not_cancelable():
 
 async def test_subscribe_endpoint_not_found():
     """POST /v1/tasks/{id}:subscribe with non-existent task triggers error."""
-    app = _make_app(EchoWorker())
+    app = _make_app(EchoWorker(), streaming=True)
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -117,7 +117,7 @@ async def test_subscribe_endpoint_not_found():
 
 async def test_subscribe_endpoint_terminal_state():
     """POST /v1/tasks/{id}:subscribe on completed task triggers UnsupportedOperationError."""
-    app = _make_app(EchoWorker())
+    app = _make_app(EchoWorker(), streaming=True)
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -247,7 +247,7 @@ async def test_sanitize_task_strips_internal_metadata():
 
 async def test_subscribe_endpoint_active_task_streams():
     """POST /v1/tasks/{id}:subscribe on an active task streams events."""
-    app = _make_app(InputRequiredWorker())
+    app = _make_app(InputRequiredWorker(), streaming=True)
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -355,11 +355,36 @@ async def test_a2a_version_header_incompatible():
             assert resp.status_code == 400
 
 
+async def test_push_notification_config_stubs():
+    """Push notification config endpoints return 501 not supported."""
+    app = _make_app(EchoWorker())
+    async with LifespanManager(app) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            task_id = "some-task"
+
+            resp = await client.post(f"/v1/tasks/{task_id}/pushNotificationConfig:set", json={})
+            assert resp.status_code == 501
+            assert resp.json()["code"] == -32003
+
+            resp = await client.get(f"/v1/tasks/{task_id}/pushNotificationConfig")
+            assert resp.status_code == 501
+            assert resp.json()["code"] == -32003
+
+            resp = await client.get(f"/v1/tasks/{task_id}/pushNotificationConfig:list")
+            assert resp.status_code == 501
+            assert resp.json()["code"] == -32003
+
+            resp = await client.delete(f"/v1/tasks/{task_id}/pushNotificationConfig")
+            assert resp.status_code == 501
+            assert resp.json()["code"] == -32003
+
+
 async def test_stream_direct_reply_filtering():
     """message:stream with DirectReplyWorker filters DirectReply events in SSE."""
     from conftest import DirectReplyWorker
 
-    app = _make_app(DirectReplyWorker())
+    app = _make_app(DirectReplyWorker(), streaming=True)
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

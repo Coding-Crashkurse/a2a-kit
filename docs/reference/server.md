@@ -84,10 +84,41 @@ User-friendly configuration for the agent discovery card.
 | `protocol_version` | `str` | `"0.3.0"` | A2A protocol version |
 | `skills` | `list[SkillConfig]` | `[]` | Agent skills |
 | `extensions` | `list[ExtensionConfig]` | `[]` | Agent extensions |
-| `streaming` | `bool` | `True` | Supports streaming |
-| `push_notifications` | `bool` | `False` | Supports push notifications |
+| `capabilities` | `CapabilitiesConfig` | `CapabilitiesConfig()` | Agent capabilities (see below) |
+| `protocol` | `Literal["jsonrpc", "http+json"]` | `"jsonrpc"` | Transport protocol |
 | `input_modes` | `list[str]` | `["application/json", "text/plain"]` | Accepted input modes |
 | `output_modes` | `list[str]` | `["application/json", "text/plain"]` | Produced output modes |
+
+## CapabilitiesConfig
+
+Declares which A2A protocol features this agent supports. All capabilities default to `False` (opt-in).
+
+```python
+from a2akit import CapabilitiesConfig
+
+caps = CapabilitiesConfig(streaming=True)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `streaming` | `bool` | `False` | Enable SSE streaming (`message:stream`, `tasks:subscribe`) |
+| `push_notifications` | `bool` | `False` | Push notifications (not yet implemented, raises `NotImplementedError`) |
+| `extended_agent_card` | `bool` | `False` | Extended agent card (not yet implemented, raises `NotImplementedError`) |
+| `extensions` | `list[AgentExtension] \| None` | `None` | Protocol extensions (not yet implemented, raises `NotImplementedError`) |
+
+!!! warning "Streaming is opt-in"
+    Since v0.0.7, streaming defaults to `False`. Agents that use streaming must explicitly enable it:
+
+    ```python
+    AgentCardConfig(
+        name="My Agent",
+        description="...",
+        version="0.1.0",
+        capabilities=CapabilitiesConfig(streaming=True),
+    )
+    ```
+
+    Without this, the server rejects streaming requests with `UnsupportedOperationError`, and the client raises `AgentCapabilityError` before making the request.
 
 ## SkillConfig
 

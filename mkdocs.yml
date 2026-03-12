@@ -96,6 +96,7 @@ nav:
   - API Reference:
     - TaskContext: reference/taskcontext.md
     - A2AServer & Config: reference/server.md
+    - A2AClient: reference/client.md
     - Storage: reference/storage.md
     - Broker: reference/broker.md
     - EventBus: reference/eventbus.md
@@ -103,6 +104,7 @@ nav:
   - Configuration: configuration.md
   - Examples:
     - Echo: examples/echo.md
+    - Client: examples/client.md
     - Streaming: examples/streaming.md
     - Dependency Injection: examples/dependency-injection.md
     - Middleware: examples/middleware-secret.md

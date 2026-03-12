@@ -172,6 +172,7 @@ class A2AServer:
             app.state.broker = broker
             app.state.event_bus = event_bus
             app.state.middlewares = server._middlewares
+            app.state.capabilities = server._card_config.capabilities
 
             await server._deps.startup()
             async with storage, broker, event_bus, adapter.run():
@@ -183,6 +184,7 @@ class A2AServer:
                     del app.state.storage
                     del app.state.event_bus
                     del app.state.middlewares
+                    del app.state.capabilities
                     await server._deps.shutdown()
 
         fastapi_kwargs.setdefault("title", self._card_config.name)

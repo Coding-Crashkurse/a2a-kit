@@ -12,7 +12,7 @@ from a2a.types import (
     AgentSkill,
     TransportProtocol,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SkillConfig(BaseModel):
@@ -33,6 +33,31 @@ class ExtensionConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class CapabilitiesConfig(BaseModel):
+    """Declares which A2A protocol features this agent supports.
+
+    All capabilities default to False (opt-in). Features not yet
+    implemented by a2akit raise NotImplementedError when set to True.
+    """
+
+    streaming: bool = False
+    push_notifications: bool = False
+    extended_agent_card: bool = False
+    extensions: list[AgentExtension] | None = None
+
+    @model_validator(mode="after")
+    def _check_not_yet_supported(self) -> CapabilitiesConfig:
+        unsupported = {
+            "push_notifications": self.push_notifications,
+            "extended_agent_card": self.extended_agent_card,
+            "extensions": bool(self.extensions),
+        }
+        for name, enabled in unsupported.items():
+            if enabled:
+                raise NotImplementedError(f"{name} is not yet supported by a2akit.")
+        return self
+
+
 class AgentCardConfig(BaseModel):
     """User-friendly configuration for building an AgentCard."""
 
@@ -43,9 +68,7 @@ class AgentCardConfig(BaseModel):
     skills: list[SkillConfig] = Field(default_factory=list)
     extensions: list[ExtensionConfig] = Field(default_factory=list)
 
-    streaming: bool = True
-    push_notifications: bool = False
-    supports_extended_card: bool = False
+    capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
 
     protocol: Literal["jsonrpc", "http+json"] = "jsonrpc"
 
@@ -95,6 +118,7 @@ def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
         agent_url = f"{stripped}/v1"
         transport = TransportProtocol.http_json
 
+    caps = config.capabilities
     return AgentCard(
         protocol_version=config.protocol_version,
         name=config.name,
@@ -107,14 +131,14 @@ def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
         version=config.version,
         capabilities=AgentCapabilities(
             extensions=[_to_agent_extension(e) for e in config.extensions] or None,
-            streaming=config.streaming,
-            push_notifications=config.push_notifications,
+            streaming=caps.streaming,
+            push_notifications=caps.push_notifications,
             state_transition_history=False,
         ),
         default_input_modes=config.input_modes,
         default_output_modes=config.output_modes,
         skills=[_to_agent_skill(s) for s in config.skills],
-        supports_authenticated_extended_card=config.supports_extended_card,
+        supports_authenticated_extended_card=caps.extended_agent_card,
     )
 
 

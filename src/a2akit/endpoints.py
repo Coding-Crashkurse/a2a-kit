@@ -19,7 +19,12 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from a2akit.agent_card import AgentCardConfig, build_agent_card, external_base_url
 from a2akit.middleware import A2AMiddleware, RequestEnvelope
 from a2akit.schema import DirectReply, StreamEvent
-from a2akit.storage.base import ListTasksQuery, TaskNotCancelableError, TaskNotFoundError
+from a2akit.storage.base import (
+    ListTasksQuery,
+    TaskNotCancelableError,
+    TaskNotFoundError,
+    UnsupportedOperationError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -104,6 +109,13 @@ def _get_tm(request: Request) -> TaskManager:
     return tm
 
 
+def _check_streaming(request: Request) -> None:
+    """Raise UnsupportedOperationError if streaming is not enabled."""
+    caps = getattr(request.app.state, "capabilities", None)
+    if caps is not None and not caps.streaming:
+        raise UnsupportedOperationError("Streaming is not supported by this agent")
+
+
 def _validate_ids(params: MessageSendParams) -> MessageSendParams:
     """Validate that messageId is present."""
     msg = params.message
@@ -115,19 +127,6 @@ def _validate_ids(params: MessageSendParams) -> MessageSendParams:
     return params
 
 
-# ---------------------------------------------------------------------------
-# SSE setup dependencies
-#
-# These run in the normal request context BEFORE FastAPI's SSE producer
-# TaskGroup is created. Any exception raised here (HTTPException, business
-# errors like TaskNotFoundError, UnsupportedOperationError) flows through
-# FastAPI's exception handlers and produces a proper HTTP error response.
-#
-# The endpoint functions themselves only contain yield statements inside
-# the SSE producer — no fallible setup code.
-# ---------------------------------------------------------------------------
-
-
 async def _stream_setup(
     request: Request,
     params: MessageSendParams,
@@ -137,6 +136,7 @@ async def _stream_setup(
     Runs in normal async context so that exceptions produce proper
     HTTP error responses instead of being wrapped in ExceptionGroup.
     """
+    _check_streaming(request)
     params = _validate_ids(params)
     tm = _get_tm(request)
     middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
@@ -160,6 +160,7 @@ async def _subscribe_setup(
     Runs in normal async context so that TaskNotFoundError and
     UnsupportedOperationError produce proper HTTP error responses.
     """
+    _check_streaming(request)
     tm = _get_tm(request)
     agen = tm.subscribe_task(task_id, after_event_id=last_event_id)
     first_event = await anext(agen)
@@ -303,6 +304,38 @@ def build_a2a_router() -> APIRouter:
                 yield ServerSentEvent(raw_data=_wrap_stream_event(ev))
         except Exception:
             logger.exception("SSE subscribe stream aborted")
+
+    @router.post("/v1/tasks/{task_id}/pushNotificationConfig:set")
+    async def push_config_set(task_id: str = Path()) -> JSONResponse:
+        """Stub: push notification config set — not supported."""
+        return JSONResponse(
+            status_code=501,
+            content={"code": -32003, "message": "Push notifications are not supported"},
+        )
+
+    @router.get("/v1/tasks/{task_id}/pushNotificationConfig")
+    async def push_config_get(task_id: str = Path()) -> JSONResponse:
+        """Stub: push notification config get — not supported."""
+        return JSONResponse(
+            status_code=501,
+            content={"code": -32003, "message": "Push notifications are not supported"},
+        )
+
+    @router.get("/v1/tasks/{task_id}/pushNotificationConfig:list")
+    async def push_config_list(task_id: str = Path()) -> JSONResponse:
+        """Stub: push notification config list — not supported."""
+        return JSONResponse(
+            status_code=501,
+            content={"code": -32003, "message": "Push notifications are not supported"},
+        )
+
+    @router.delete("/v1/tasks/{task_id}/pushNotificationConfig")
+    async def push_config_delete(task_id: str = Path()) -> JSONResponse:
+        """Stub: push notification config delete — not supported."""
+        return JSONResponse(
+            status_code=501,
+            content={"code": -32003, "message": "Push notifications are not supported"},
+        )
 
     @router.get("/v1/health")
     async def health_check() -> dict[str, str]:

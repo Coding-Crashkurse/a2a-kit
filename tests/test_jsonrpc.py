@@ -10,7 +10,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 from pydantic import ValidationError
 
-from a2akit import A2AServer, AgentCardConfig
+from a2akit import A2AServer, AgentCardConfig, CapabilitiesConfig
 from conftest import (
     DirectReplyWorker,
     EchoWorker,
@@ -18,7 +18,7 @@ from conftest import (
 )
 
 
-def _make_jsonrpc_app(worker, **server_kwargs):
+def _make_jsonrpc_app(worker, *, streaming=False, **server_kwargs):
     """Create a FastAPI app with JSON-RPC protocol (default)."""
     server = A2AServer(
         worker=worker,
@@ -26,6 +26,7 @@ def _make_jsonrpc_app(worker, **server_kwargs):
             name="Test Agent",
             description="Test agent for unit tests",
             version="0.0.1",
+            capabilities=CapabilitiesConfig(streaming=streaming),
             # protocol defaults to "jsonrpc"
         ),
         **server_kwargs,
@@ -43,6 +44,20 @@ async def jrpc_app():
 @pytest.fixture
 async def jrpc_client(jrpc_app):
     transport = httpx.ASGITransport(app=jrpc_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+@pytest.fixture
+async def jrpc_streaming_app():
+    raw_app = _make_jsonrpc_app(EchoWorker(), streaming=True)
+    async with LifespanManager(raw_app) as manager:
+        yield manager.app
+
+
+@pytest.fixture
+async def jrpc_streaming_client(jrpc_streaming_app):
+    transport = httpx.ASGITransport(app=jrpc_streaming_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
@@ -255,14 +270,62 @@ class TestTasksCancel:
         assert "error" not in data
 
 
+# ── tasks/list ────────────────────────────────────────────────────────
+
+
+class TestTasksList:
+    async def test_list_empty(self, jrpc_client):
+        resp = await jrpc_client.post("/", json=_rpc("tasks/list", {}))
+        data = resp.json()
+        assert "result" in data
+        assert data["result"]["tasks"] == []
+        assert data["result"]["totalSize"] == 0
+
+    async def test_list_returns_created_tasks(self, jrpc_client):
+        # Create two tasks
+        params1 = _send_params("first")
+        params2 = _send_params("second")
+        resp1 = await jrpc_client.post("/", json=_rpc("message/send", params1))
+        resp2 = await jrpc_client.post("/", json=_rpc("message/send", params2))
+        task_id_1 = resp1.json()["result"]["id"]
+        task_id_2 = resp2.json()["result"]["id"]
+
+        resp = await jrpc_client.post("/", json=_rpc("tasks/list", {}))
+        data = resp.json()
+        assert "result" in data
+        result = data["result"]
+        assert result["totalSize"] == 2
+        returned_ids = {t["id"] for t in result["tasks"]}
+        assert task_id_1 in returned_ids
+        assert task_id_2 in returned_ids
+
+    async def test_list_with_page_size(self, jrpc_client):
+        # Create two tasks, request pageSize=1
+        await jrpc_client.post("/", json=_rpc("message/send", _send_params("a")))
+        await jrpc_client.post("/", json=_rpc("message/send", _send_params("b")))
+
+        resp = await jrpc_client.post("/", json=_rpc("tasks/list", {"pageSize": 1}))
+        data = resp.json()["result"]
+        assert len(data["tasks"]) == 1
+        assert data["pageSize"] == 1
+        # Should have a next page token
+        assert data["nextPageToken"] != ""
+
+    async def test_list_no_params(self, jrpc_client):
+        """tasks/list with no params at all should work (all optional)."""
+        resp = await jrpc_client.post("/", json=_rpc("tasks/list"))
+        data = resp.json()
+        assert "result" in data
+
+
 # ── message/sendStream ───────────────────────────────────────────────
 
 
 class TestMessageSendStream:
-    async def test_stream_returns_sse(self, jrpc_client):
+    async def test_stream_returns_sse(self, jrpc_streaming_client):
         params = _send_params("hello world")
         params.pop("configuration", None)  # non-blocking for stream
-        resp = await jrpc_client.post("/", json=_rpc("message/sendStream", params))
+        resp = await jrpc_streaming_client.post("/", json=_rpc("message/sendStream", params))
         assert resp.status_code == 200
         # Parse SSE lines
         text = resp.text
@@ -276,8 +339,10 @@ class TestMessageSendStream:
         assert first["jsonrpc"] == "2.0"
         assert "result" in first
 
-    async def test_stream_invalid_params(self, jrpc_client):
-        resp = await jrpc_client.post("/", json=_rpc("message/sendStream", {"garbage": True}))
+    async def test_stream_invalid_params(self, jrpc_streaming_client):
+        resp = await jrpc_streaming_client.post(
+            "/", json=_rpc("message/sendStream", {"garbage": True})
+        )
         data = resp.json()
         assert data["error"]["code"] == -32602
 
@@ -299,6 +364,17 @@ class TestPushNotificationStubs:
         resp = await jrpc_client.post("/", json=_rpc(method, {}))
         data = resp.json()
         assert data["error"]["code"] == -32003
+
+
+# ── Health ────────────────────────────────────────────────────────────
+
+
+class TestHealth:
+    async def test_health(self, jrpc_client):
+        resp = await jrpc_client.post("/", json=_rpc("health", {}))
+        data = resp.json()
+        assert "result" in data
+        assert data["result"]["status"] == "ok"
 
 
 # ── Multi-turn ───────────────────────────────────────────────────────

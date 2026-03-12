@@ -12,6 +12,7 @@ from asgi_lifespan import LifespanManager
 from a2akit import (
     A2AServer,
     AgentCardConfig,
+    CapabilitiesConfig,
     InMemoryBroker,
     InMemoryEventBus,
     InMemoryStorage,
@@ -165,7 +166,7 @@ class StatusWorker(Worker):
         await ctx.complete("Done")
 
 
-def _make_app(worker: Worker, **server_kwargs) -> FastAPI:
+def _make_app(worker: Worker, *, streaming: bool = False, **server_kwargs: object) -> FastAPI:
     """Create a FastAPI app with the given worker."""
     server = A2AServer(
         worker=worker,
@@ -174,6 +175,7 @@ def _make_app(worker: Worker, **server_kwargs) -> FastAPI:
             description="Test agent for unit tests",
             version="0.0.1",
             protocol="http+json",
+            capabilities=CapabilitiesConfig(streaming=streaming),
         ),
         **server_kwargs,
     )
@@ -199,7 +201,7 @@ async def client(app):
 @pytest.fixture
 async def streaming_app():
     """App with StreamingWorker for SSE tests (lifespan started)."""
-    raw_app = _make_app(StreamingWorker())
+    raw_app = _make_app(StreamingWorker(), streaming=True)
     async with LifespanManager(raw_app) as manager:
         yield manager.app
 

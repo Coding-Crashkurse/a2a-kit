@@ -100,8 +100,6 @@ class SQLStorageBase(Storage[ContextT]):
             raise RuntimeError(msg)
         return self._session_factory()
 
-    # -- Serialization helpers --
-
     @staticmethod
     def _serialize_message(msg: Message | None) -> str | None:
         if msg is None:
@@ -168,8 +166,6 @@ class SQLStorageBase(Storage[ContextT]):
             artifacts=artifacts_list if artifacts_list else None,
             metadata=metadata_raw,
         )
-
-    # -- Storage interface --
 
     async def load_task(
         self,
@@ -322,14 +318,12 @@ class SQLStorageBase(Storage[ContextT]):
             if query.status_timestamp_after:
                 conditions.append(tasks_table.c.status_timestamp > query.status_timestamp_after)
 
-            # Count
             count_q = tasks_table.select()
             for cond in conditions:
                 count_q = count_q.where(cond)
             count_result = await session.execute(count_q)
             total_size = len(count_result.fetchall())
 
-            # Data
             data_q = tasks_table.select()
             for cond in conditions:
                 data_q = data_q.where(cond)

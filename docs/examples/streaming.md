@@ -4,7 +4,7 @@ Emits the user's input word-by-word as streaming artifacts with progress updates
 
 ```python
 import asyncio
-from a2akit import A2AServer, AgentCardConfig, TaskContext, Worker
+from a2akit import A2AServer, AgentCardConfig, CapabilitiesConfig, TaskContext, Worker
 
 
 class StreamingWorker(Worker):
@@ -33,6 +33,7 @@ server = A2AServer(
         name="Streamer",
         description="Word-by-word streaming",
         version="0.1.0",
+        capabilities=CapabilitiesConfig(streaming=True),
     ),
 )
 app = server.as_fastapi_app()

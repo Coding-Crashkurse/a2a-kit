@@ -1,12 +1,14 @@
 """a2akit — A2A agent framework in one import."""
 
-from a2akit.agent_card import AgentCardConfig, ExtensionConfig, SkillConfig
+from a2akit.agent_card import AgentCardConfig, CapabilitiesConfig, ExtensionConfig, SkillConfig
 from a2akit.broker import (
     Broker,
     CancelRegistry,
     InMemoryBroker,
     InMemoryCancelRegistry,
 )
+from a2akit.client import A2AClient, ClientResult
+from a2akit.client import StreamEvent as ClientStreamEvent
 from a2akit.config import Settings, get_settings
 from a2akit.dependencies import Dependency, DependencyContainer
 from a2akit.event_bus import EventBus, InMemoryEventBus
@@ -30,12 +32,16 @@ from a2akit.task_manager import TaskManager
 from a2akit.worker import FileInfo, TaskContext, Worker
 
 __all__ = [
+    "A2AClient",
     "A2AMiddleware",
     "A2AServer",
     "AgentCardConfig",
     "ArtifactWrite",
     "Broker",
     "CancelRegistry",
+    "CapabilitiesConfig",
+    "ClientResult",
+    "ClientStreamEvent",
     "ContextMismatchError",
     "DefaultEventEmitter",
     "Dependency",
