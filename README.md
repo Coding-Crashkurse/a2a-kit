@@ -16,10 +16,11 @@ Streaming, cancellation, multi-turn conversations, and artifact handling — bat
 pip install a2akit
 ```
 
-With optional LangGraph support:
+With optional extras:
 
 ```bash
-pip install a2akit[langgraph]
+pip install a2akit[langgraph]   # LangGraph integration
+pip install a2akit[otel]        # OpenTelemetry tracing & metrics
 ```
 
 ## Quick Start
@@ -73,6 +74,7 @@ async with A2AClient("http://localhost:8000") as client:
 - **Middleware** — pipeline for auth extraction, header injection, payload sanitization
 - **Lifecycle hooks** — fire-and-forget callbacks on terminal state transitions
 - **Dependency injection** — shared infrastructure with automatic lifecycle management
+- **OpenTelemetry** — opt-in distributed tracing and metrics (`pip install a2akit[otel]`)
 - **Pluggable backends** — PostgreSQL, SQLite, and more (Redis, RabbitMQ coming soon)
 - **Type-safe** — full type hints, `py.typed` marker, PEP 561 compliant
 

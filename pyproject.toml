@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "a2akit"
-version = "0.0.6"
+version = "0.0.7"
 description = "A2A agent framework in one import."
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,10 @@ langgraph = ["langgraph>=0.2.0"]
 postgres = ["sqlalchemy[asyncio]>=2.0", "asyncpg>=0.29"]
 sqlite = ["sqlalchemy[asyncio]>=2.0", "aiosqlite>=0.20"]
 sql = ["sqlalchemy[asyncio]>=2.0"]
+otel = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/markuslang1987/a2akit"
@@ -61,6 +65,8 @@ dev = [
     "asgi-lifespan>=2.1.0",
     "pre-commit>=4.0",
     "mypy>=1.14",
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -125,7 +131,7 @@ show_error_codes = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["a2a_sdk.*", "uvicorn.*", "pytest.*", "asgi_lifespan.*", "httpx.*", "langgraph.*", "asyncpg.*", "aiosqlite.*", "sqlalchemy.*"]
+module = ["a2a_sdk.*", "uvicorn.*", "pytest.*", "asgi_lifespan.*", "httpx.*", "langgraph.*", "asyncpg.*", "aiosqlite.*", "sqlalchemy.*", "opentelemetry.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

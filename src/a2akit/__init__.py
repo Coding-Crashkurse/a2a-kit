@@ -29,9 +29,11 @@ from a2akit.storage import (
 )
 from a2akit.storage.base import ListTasksQuery, ListTasksResult
 from a2akit.task_manager import TaskManager
+from a2akit.telemetry import OTEL_ENABLED
 from a2akit.worker import FileInfo, TaskContext, Worker
 
 __all__ = [
+    "OTEL_ENABLED",
     "A2AClient",
     "A2AMiddleware",
     "A2AServer",

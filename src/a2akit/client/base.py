@@ -27,6 +27,14 @@ from a2akit.client.errors import (
 from a2akit.client.result import ClientResult, ListResult, StreamEvent
 from a2akit.client.transport.jsonrpc import JsonRpcTransport
 from a2akit.client.transport.rest import RestTransport
+from a2akit.telemetry._client import traced_client_method
+from a2akit.telemetry._semantic import (
+    SPAN_CLIENT_CANCEL,
+    SPAN_CLIENT_CONNECT,
+    SPAN_CLIENT_GET_TASK,
+    SPAN_CLIENT_LIST_TASKS,
+    SPAN_CLIENT_SEND,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -64,6 +72,7 @@ class A2AClient:
         self._connected = False
         self._active_protocol: str = ""
 
+    @traced_client_method(SPAN_CLIENT_CONNECT)
     async def connect(self) -> None:
         """Discover agent and prepare transport."""
         if self._http_client is None:
@@ -187,6 +196,7 @@ class A2AClient:
             metadata=metadata,
         )
 
+    @traced_client_method(SPAN_CLIENT_SEND)
     async def send_parts(
         self,
         parts: list[Part],
@@ -250,6 +260,7 @@ class A2AClient:
             if event.kind == "artifact" and event.text:
                 yield event.text
 
+    @traced_client_method(SPAN_CLIENT_GET_TASK)
     async def get_task(
         self,
         task_id: str,
@@ -261,6 +272,7 @@ class A2AClient:
         task = await transport.get_task(task_id, history_length)
         return ClientResult.from_task(task)
 
+    @traced_client_method(SPAN_CLIENT_LIST_TASKS)
     async def list_tasks(
         self,
         *,
@@ -292,6 +304,7 @@ class A2AClient:
             page_size=page_size,
         )
 
+    @traced_client_method(SPAN_CLIENT_CANCEL)
     async def cancel(self, task_id: str) -> ClientResult:
         """Cancel a task by ID."""
         transport = self._ensure_connected()

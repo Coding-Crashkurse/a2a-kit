@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.7] — 2026-03-12
+
+### Added
+- **OpenTelemetry integration** — opt-in distributed tracing and metrics via `pip install a2akit[otel]`.
+  - `TracingMiddleware` — creates root server spans per incoming A2A request with W3C context propagation.
+  - `TracingEmitter` — adds span events for state transitions and records task metrics (duration, active count, errors).
+  - Worker adapter instrumentation — wraps `_run_task_inner` with `a2akit.task.process` spans.
+  - Client-side spans — `@traced_client_method` decorator on `send`, `connect`, `get_task`, `cancel`, `list_tasks`.
+  - Context propagation — `traceparent` header injection in outgoing client requests for distributed tracing.
+  - Semantic conventions in `a2akit.telemetry._semantic` with standardized span names, attribute keys, and metric names.
+  - No-op fallback — zero overhead when OpenTelemetry is not installed.
+  - Kill-switch — `OTEL_INSTRUMENTATION_A2AKIT_ENABLED=false` env-var to disable at runtime.
+  - `enable_telemetry` parameter on `A2AServer` — `None` (auto-detect), `True` (force), `False` (disable).
+  - Server-side metrics — `a2akit.task.duration`, `a2akit.task.active`, `a2akit.task.total`, `a2akit.task.errors`.
+  - `examples/otel_tracing.py` — reference example with console span exporter.
+  - Comprehensive telemetry test suite.
+- `OTEL_ENABLED` flag exported from `a2akit` top-level.
+
 ## [0.0.6] — 2026-03-12
 
 ### Added

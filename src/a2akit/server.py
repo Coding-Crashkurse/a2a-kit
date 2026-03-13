@@ -20,7 +20,7 @@ from a2akit.config import Settings, get_settings
 from a2akit.dependencies import DependencyContainer
 from a2akit.endpoints import build_a2a_router, build_discovery_router
 from a2akit.event_bus import EventBus, InMemoryEventBus
-from a2akit.event_emitter import DefaultEventEmitter
+from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
 from a2akit.hooks import HookableEmitter, LifecycleHooks
 from a2akit.jsonrpc import build_jsonrpc_router
 from a2akit.storage import (
@@ -63,6 +63,7 @@ class A2AServer:
         hooks: LifecycleHooks | None = None,
         settings: Settings | None = None,
         dependencies: dict[Any, Any] | None = None,
+        enable_telemetry: bool | None = None,
     ) -> None:
         """Store configuration for lazy initialization at startup."""
         validate_protocol(agent_card.protocol)
@@ -88,7 +89,22 @@ class A2AServer:
         self._max_retries = s.max_retries
         self._settings = s
         self._hooks = hooks
+        self._enable_telemetry = enable_telemetry
         self._deps = DependencyContainer(dependencies)
+
+    def _is_telemetry_enabled(self) -> bool:
+        """Determine if OTel instrumentation should be active."""
+        if self._enable_telemetry is False:
+            return False
+        from a2akit.telemetry._instruments import OTEL_ENABLED
+
+        if self._enable_telemetry is True and not OTEL_ENABLED:
+            msg = (
+                "enable_telemetry=True but OpenTelemetry is not installed. "
+                "Install with: pip install a2akit[otel]"
+            )
+            raise RuntimeError(msg)
+        return OTEL_ENABLED
 
     def _build_storage(self) -> Storage:
         """Resolve the storage spec into a Storage instance."""
@@ -143,9 +159,13 @@ class A2AServer:
             event_bus = server._build_event_bus()
             cancel_registry = server._cancel_registry or InMemoryCancelRegistry()
             base_emitter = DefaultEventEmitter(event_bus, storage)
-            emitter = (
+            emitter: EventEmitter = (
                 HookableEmitter(base_emitter, server._hooks) if server._hooks else base_emitter
             )
+            if server._is_telemetry_enabled():
+                from a2akit.telemetry._emitter import TracingEmitter
+
+                emitter = TracingEmitter(emitter)
             adapter = WorkerAdapter(
                 server._worker,
                 broker,
@@ -171,7 +191,12 @@ class A2AServer:
             app.state.storage = storage
             app.state.broker = broker
             app.state.event_bus = event_bus
-            app.state.middlewares = server._middlewares
+            middlewares = list(server._middlewares)
+            if server._is_telemetry_enabled():
+                from a2akit.telemetry._middleware import TracingMiddleware
+
+                middlewares.insert(0, TracingMiddleware())
+            app.state.middlewares = middlewares
             app.state.capabilities = server._card_config.capabilities
 
             await server._deps.startup()

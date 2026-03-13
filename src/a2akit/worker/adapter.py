@@ -199,64 +199,102 @@ class WorkerAdapter:
         request_context: dict[str, Any] | None = None,
     ) -> None:
         """Inner task execution — called with or without lock."""
+        from contextlib import nullcontext
+
+        from a2akit.telemetry._instruments import get_tracer
+        from a2akit.telemetry._semantic import (
+            ATTR_CONTEXT_ID,
+            ATTR_IS_NEW_TASK,
+            ATTR_TASK_ID,
+            ATTR_TASK_STATE,
+            ATTR_WORKER_CLASS,
+            EVENT_CANCEL_REQUESTED,
+            SPAN_TASK_PROCESS,
+        )
+
         message = params.message
         task_id = message.task_id
         context_id = message.context_id
         if not task_id:
             raise ValueError("message.task_id is missing")
 
-        emitter = self._emitter
-        cancel_event = self._cancel_registry.on_cancel(task_id)
-        try:
-            if await self._cancel_registry.is_cancelled(task_id):
-                # Check if the task is already terminal (e.g. TaskManager's
-                # instant cancel on submitted).  If so, skip _mark_canceled
-                # to avoid double-writing.
-                current = await self._storage.load_task(task_id)
-                if not current or current.status.state not in TERMINAL_STATES:
-                    await self._mark_canceled(self._storage, self._emitter, task_id, context_id)
-                return
+        tracer = get_tracer()
+        span_ctx: Any = nullcontext()
+        if tracer is not None:
+            from opentelemetry.trace import SpanKind
 
-            ctx = await self._context_factory.build(
-                message,
-                cancel_event,
-                is_new_task=is_new_task,
-                request_context=request_context,
+            span_ctx = tracer.start_as_current_span(
+                SPAN_TASK_PROCESS,
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    ATTR_TASK_ID: task_id,
+                    ATTR_CONTEXT_ID: context_id or "",
+                    ATTR_IS_NEW_TASK: is_new_task,
+                    ATTR_WORKER_CLASS: type(self._user_worker).__name__,
+                },
             )
 
+        emitter = self._emitter
+        cancel_event = self._cancel_registry.on_cancel(task_id)
+        with span_ctx as span:
             try:
-                working_version = await emitter.update_task(task_id, state=TaskState.working)
-            except TaskTerminalStateError:
-                # Task was already terminated (e.g., canceled before the
-                # worker picked it up).  Nothing to do — just clean up.
-                return
+                if await self._cancel_registry.is_cancelled(task_id):
+                    current = await self._storage.load_task(task_id)
+                    if not current or current.status.state not in TERMINAL_STATES:
+                        await self._mark_canceled(
+                            self._storage, self._emitter, task_id, context_id
+                        )
+                    if span:
+                        span.add_event(EVENT_CANCEL_REQUESTED)
+                    return
 
-            # Seed context with the version from the working transition
-            # so subsequent _versioned_update calls use OCC.
-            ctx._version = working_version
+                ctx = await self._context_factory.build(
+                    message,
+                    cancel_event,
+                    is_new_task=is_new_task,
+                    request_context=request_context,
+                )
 
-            await ctx.send_status()
+                try:
+                    working_version = await emitter.update_task(task_id, state=TaskState.working)
+                except TaskTerminalStateError:
+                    return
 
-            try:
-                await self._user_worker.handle(ctx)
-                if not ctx.turn_ended:
-                    await ctx.fail(
-                        "Worker returned without calling a lifecycle method "
-                        "(complete/fail/reject/respond/request_input/request_auth)"
-                    )
-            except anyio.get_cancelled_exc_class():
-                await self._mark_canceled(self._storage, self._emitter, task_id, context_id)
-            except TaskTerminalStateError:
-                # Task reached terminal state during processing
-                # (e.g., force-cancel wrote 'canceled' concurrently).
-                # Nothing to do — cleanup runs in finally.
-                logger.info("Task %s reached terminal state during processing", task_id)
-            except Exception as exc:
-                logger.exception("Worker error for task %s", task_id)
-                await self._mark_failed(emitter, self._storage, task_id, context_id, str(exc))
-        finally:
-            await self._event_bus.cleanup(task_id)
-            await self._cancel_registry.cleanup(task_id)
+                ctx._version = working_version
+                await ctx.send_status()
+
+                try:
+                    await self._user_worker.handle(ctx)
+                    if not ctx.turn_ended:
+                        await ctx.fail(
+                            "Worker returned without calling a lifecycle method "
+                            "(complete/fail/reject/respond/request_input/request_auth)"
+                        )
+                except anyio.get_cancelled_exc_class():
+                    if span:
+                        span.add_event(EVENT_CANCEL_REQUESTED)
+                    await self._mark_canceled(self._storage, self._emitter, task_id, context_id)
+                except TaskTerminalStateError:
+                    logger.info("Task %s reached terminal state during processing", task_id)
+                except Exception as exc:
+                    logger.exception("Worker error for task %s", task_id)
+                    if span:
+                        span.record_exception(exc)
+                        from opentelemetry.trace import StatusCode
+
+                        span.set_status(StatusCode.ERROR, str(exc))
+                    await self._mark_failed(emitter, self._storage, task_id, context_id, str(exc))
+                else:
+                    if span:
+                        loaded = await self._storage.load_task(task_id)
+                        if loaded and loaded.status:
+                            span.set_attribute(ATTR_TASK_STATE, loaded.status.state.value)
+                        from opentelemetry.trace import StatusCode
+
+                        span.set_status(StatusCode.OK)
+            finally:
+                await self._event_bus.cleanup(task_id)
+                await self._cancel_registry.cleanup(task_id)
 
     @staticmethod
     async def _mark_canceled(

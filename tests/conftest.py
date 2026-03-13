@@ -270,6 +270,43 @@ async def event_bus():
 
 
 @pytest.fixture
+def otel_setup():
+    """Setup InMemorySpanExporter for OTel tests.
+
+    Properly resets the global TracerProvider so tests don't interfere.
+    """
+    from opentelemetry import trace as trace_api
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    # Force-reset the global provider (OTel only allows set_tracer_provider once)
+    trace_api._TRACER_PROVIDER_SET_ONCE._done = False  # type: ignore[attr-defined]
+    trace_api._TRACER_PROVIDER = None  # type: ignore[attr-defined]
+    trace_api.set_tracer_provider(provider)
+
+    # Reset a2akit's lazy singletons so they pick up the new provider
+    import a2akit.telemetry._instruments as inst
+
+    old_enabled = inst.OTEL_ENABLED
+    inst.OTEL_ENABLED = True
+    inst._tracer = None
+    inst._meter = None
+
+    yield exporter
+
+    inst.OTEL_ENABLED = old_enabled
+    inst._tracer = None
+    inst._meter = None
+    exporter.clear()
+    provider.shutdown()
+
+
+@pytest.fixture
 def make_send_params():
     """Factory for MessageSendParams dicts with defaults."""
 

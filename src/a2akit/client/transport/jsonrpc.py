@@ -42,7 +42,11 @@ class JsonRpcTransport(Transport):
         self._url = url.rstrip("/") + "/"
 
     def _headers(self) -> dict[str, str]:
-        return {"A2A-Version": A2A_VERSION, "Content-Type": "application/json"}
+        headers = {"A2A-Version": A2A_VERSION, "Content-Type": "application/json"}
+        from a2akit.telemetry._client import inject_trace_context
+
+        inject_trace_context(headers)
+        return headers
 
     def _envelope(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         env: dict[str, Any] = {

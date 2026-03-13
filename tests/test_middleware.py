@@ -74,6 +74,7 @@ class OrderTracker(A2AMiddleware):
 def _make_app(worker: Worker, middlewares: list[A2AMiddleware] | None = None):
     server = A2AServer(
         worker=worker,
+        enable_telemetry=False,
         agent_card=AgentCardConfig(
             name="Middleware Test",
             description="Tests for middleware pipeline",

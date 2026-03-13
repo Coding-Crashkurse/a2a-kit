@@ -36,7 +36,11 @@ class RestTransport(Transport):
         self._base = base_url.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
-        return {"A2A-Version": A2A_VERSION}
+        headers = {"A2A-Version": A2A_VERSION}
+        from a2akit.telemetry._client import inject_trace_context
+
+        inject_trace_context(headers)
+        return headers
 
     def _url(self, path: str) -> str:
         return f"{self._base}{path}"
