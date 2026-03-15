@@ -8,6 +8,8 @@ class EchoWorker(Worker):
 
     async def handle(self, ctx: TaskContext) -> None:
         """Echo the user text back."""
+        if ctx.user_text == "fail":
+            await ctx.fail(f"Echo: {ctx.user_text}")
         await ctx.complete(f"Echo: {ctx.user_text}")
 
 
@@ -17,4 +19,4 @@ server = A2AServer(
         name="Echo", description="Echoes your input back.", version="0.1.0", protocol="http+json"
     ),
 )
-app = server.as_fastapi_app()
+app = server.as_fastapi_app(debug=True)

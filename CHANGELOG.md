@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.8] — 2026-03-15
+
+### Added
+- **Built-in Debug UI** — browser-based interface for testing and inspecting A2A agents during development.
+  - Activated via `server.as_fastapi_app(debug=True)`, served at `GET /chat`.
+  - **Chat view** — send messages to the agent, see responses with state badges (`completed`, `failed`, `input-required`, etc.). Supports both blocking and streaming agents.
+  - **Task Dashboard** — live-updating task list with configurable polling interval (0.5s–30s). Click any task to expand full details: history, artifacts, metadata.
+  - Auto-discovers agent capabilities from `/.well-known/agent-card.json`.
+  - Works with both JSON-RPC and HTTP+JSON protocols (auto-detected).
+  - Agent info sidebar shows name, version, protocol, streaming support, modes, and skills.
+  - Single self-contained HTML file (~220 KB), no additional Python dependencies.
+  - Hidden from OpenAPI schema (`include_in_schema=False`).
+  - Built with React + Vite, bundled as inline HTML via `vite-plugin-singlefile`.
+  - `debug=False` (default): zero overhead, `/chat` not mounted.
+
 ## [0.0.7] — 2026-03-12
 
 ### Added

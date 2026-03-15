@@ -86,6 +86,7 @@ nav:
     - Task Lifecycle: concepts/task-lifecycle.md
     - Worker Model: concepts/worker-model.md
   - Guides:
+    - Debug UI: guides/debug-ui.md
     - Streaming: guides/streaming.md
     - Middleware: guides/middleware.md
     - Dependency Injection: guides/dependency-injection.md

@@ -147,7 +147,7 @@ class A2AServer:
         msg = f"Unknown event bus backend: {self._event_bus_spec!r}. Use 'memory' or pass an EventBus instance."
         raise ValueError(msg)
 
-    def as_fastapi_app(self, **fastapi_kwargs: Any) -> FastAPI:
+    def as_fastapi_app(self, *, debug: bool = False, **fastapi_kwargs: Any) -> FastAPI:
         """Create a fully configured FastAPI application."""
         server = self
 
@@ -218,6 +218,12 @@ class A2AServer:
 
         app = FastAPI(lifespan=lifespan, **fastapi_kwargs)
         _register_exception_handlers(app)
+
+        if debug:
+            from a2akit._chat_ui import mount_chat_ui
+
+            mount_chat_ui(app)
+            logger.info("Debug UI available at /chat")
 
         protocol = self._card_config.protocol
         if protocol == "jsonrpc":

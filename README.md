@@ -62,8 +62,21 @@ async with A2AClient("http://localhost:8000") as client:
         print(chunk, end="")
 ```
 
+## Debug UI
+
+Enable the built-in debug interface to test your agent in the browser:
+
+```python
+app = server.as_fastapi_app(debug=True)
+```
+
+Open `http://localhost:8000/chat` — chat with your agent and inspect tasks in real time.
+
+![Debug UI](docs/images/img1.png)
+
 ## Features
 
+- **Debug UI** — built-in browser interface for chat + task inspection (`debug=True`)
 - **One-liner setup** — `A2AServer` wires storage, broker, event bus, and endpoints
 - **A2AClient** — auto-discovers agents, supports send/stream/cancel/subscribe
 - **Capabilities** — explicit opt-in for streaming, enforced on server and client

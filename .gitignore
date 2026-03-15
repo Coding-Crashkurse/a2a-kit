@@ -9,3 +9,8 @@ build/
 .pytest_cache/
 .ruff_cache/
 .coverage
+
+# UI dev artifacts
+ui/node_modules/
+ui/dist/
+ui/tsconfig.tsbuildinfo
