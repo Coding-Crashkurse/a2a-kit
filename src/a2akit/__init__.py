@@ -1,6 +1,13 @@
 """a2akit — A2A agent framework in one import."""
 
-from a2akit.agent_card import AgentCardConfig, CapabilitiesConfig, ExtensionConfig, SkillConfig
+from a2akit.agent_card import (
+    AgentCardConfig,
+    CapabilitiesConfig,
+    ExtensionConfig,
+    ProviderConfig,
+    SignatureConfig,
+    SkillConfig,
+)
 from a2akit.broker import (
     Broker,
     CancelRegistry,
@@ -60,8 +67,10 @@ __all__ = [
     "LifecycleHooks",
     "ListTasksQuery",
     "ListTasksResult",
+    "ProviderConfig",
     "RequestEnvelope",
     "Settings",
+    "SignatureConfig",
     "SkillConfig",
     "Storage",
     "TaskContext",

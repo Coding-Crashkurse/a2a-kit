@@ -10,6 +10,7 @@ class EchoWorker(Worker):
         """Echo the user text back."""
         if ctx.user_text == "fail":
             await ctx.fail(f"Echo: {ctx.user_text}")
+            return
         await ctx.complete(f"Echo: {ctx.user_text}")
 
 

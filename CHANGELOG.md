@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.10] — 2026-03-16
+
+### Added
+- **AgentCard spec completeness** — all configurable A2A v0.3.0 Agent Card fields are now
+  supported via `AgentCardConfig`.
+  - `ProviderConfig` — declare the agent's provider (`organization`, `url`).
+  - `icon_url` / `documentation_url` — optional metadata URLs.
+  - `security_schemes` / `security` — declarative security scheme definitions
+    (OpenAPI 3.0 Security Scheme Object). No enforcement — deklarativ only.
+  - `SignatureConfig` — pass externally-generated JWS signatures (`protected`, `signature`,
+    optional `header`). a2akit does not compute signatures.
+- **Per-skill modes and security** on `SkillConfig`:
+  - `input_modes` / `output_modes` — override global defaults per skill.
+  - `security` — per-skill security requirements.
+- `ProviderConfig` and `SignatureConfig` exported from `a2akit` top-level.
+- `examples/full_agent_card.py` — reference example with all new fields.
+- Comprehensive unit and E2E tests for all new fields.
+
 ## [0.0.9] — 2026-03-15
 
 ### Added

@@ -7,12 +7,34 @@ from typing import Any, Literal
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentCardSignature,
     AgentExtension,
     AgentInterface,
+    AgentProvider,
     AgentSkill,
+    SecurityScheme,
     TransportProtocol,
 )
 from pydantic import BaseModel, Field, model_validator
+
+
+class ProviderConfig(BaseModel):
+    """A2A §5.5.1 — AgentProvider information."""
+
+    organization: str
+    url: str
+
+
+class SignatureConfig(BaseModel):
+    """A2A §5.5.6 — AgentCardSignature (JWS per RFC 7515).
+
+    a2akit does NOT compute signatures. The user generates JWS externally
+    and passes the finished values here. Validation is the client's job.
+    """
+
+    protected: str
+    signature: str
+    header: dict[str, Any] | None = None
 
 
 class SkillConfig(BaseModel):
@@ -23,6 +45,10 @@ class SkillConfig(BaseModel):
     description: str
     tags: list[str] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
+
+    input_modes: list[str] | None = None
+    output_modes: list[str] | None = None
+    security: list[dict[str, list[str]]] | None = None
 
 
 class ExtensionConfig(BaseModel):
@@ -76,6 +102,18 @@ class AgentCardConfig(BaseModel):
     input_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
     output_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
 
+    # P1
+    provider: ProviderConfig | None = None
+    security_schemes: dict[str, SecurityScheme] | None = None
+    security: list[dict[str, list[str]]] | None = None
+
+    # P2
+    icon_url: str | None = None
+    documentation_url: str | None = None
+
+    # P3
+    signatures: list[SignatureConfig] | None = None
+
 
 def _to_agent_skill(skill: SkillConfig) -> AgentSkill:
     """Convert a SkillConfig to the A2A AgentSkill type."""
@@ -83,8 +121,11 @@ def _to_agent_skill(skill: SkillConfig) -> AgentSkill:
         id=skill.id,
         name=skill.name,
         description=skill.description,
-        tags=skill.tags or None,
+        tags=skill.tags,
         examples=skill.examples or None,
+        input_modes=skill.input_modes,
+        output_modes=skill.output_modes,
+        security=skill.security,
     )
 
 
@@ -140,6 +181,26 @@ def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
         default_output_modes=config.output_modes,
         skills=[_to_agent_skill(s) for s in config.skills],
         supports_authenticated_extended_card=caps.extended_agent_card,
+        provider=AgentProvider(
+            organization=config.provider.organization,
+            url=config.provider.url,
+        )
+        if config.provider
+        else None,
+        icon_url=config.icon_url,
+        documentation_url=config.documentation_url,
+        security_schemes=config.security_schemes,
+        security=config.security,
+        signatures=[
+            AgentCardSignature(
+                protected=s.protected,
+                signature=s.signature,
+                header=s.header,
+            )
+            for s in config.signatures
+        ]
+        if config.signatures
+        else None,
     )
 
 

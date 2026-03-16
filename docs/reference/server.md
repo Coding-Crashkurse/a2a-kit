@@ -88,6 +88,12 @@ User-friendly configuration for the agent discovery card.
 | `protocol` | `Literal["jsonrpc", "http+json"]` | `"jsonrpc"` | Transport protocol |
 | `input_modes` | `list[str]` | `["application/json", "text/plain"]` | Accepted input modes |
 | `output_modes` | `list[str]` | `["application/json", "text/plain"]` | Produced output modes |
+| `provider` | `ProviderConfig \| None` | `None` | Agent provider info (organization, url) |
+| `security_schemes` | `dict[str, SecurityScheme] \| None` | `None` | Security scheme declarations (deklarativ, kein Enforcement) |
+| `security` | `list[dict[str, list[str]]] \| None` | `None` | Global security requirements (OR-of-ANDs) |
+| `icon_url` | `str \| None` | `None` | URL to agent icon |
+| `documentation_url` | `str \| None` | `None` | URL to agent documentation |
+| `signatures` | `list[SignatureConfig] \| None` | `None` | JWS signatures (externally generated) |
 
 ## CapabilitiesConfig
 
@@ -121,6 +127,42 @@ caps = CapabilitiesConfig(streaming=True)
 
     Without this, the server rejects streaming requests with `UnsupportedOperationError`, and the client raises `AgentCapabilityError` before making the request.
 
+## ProviderConfig
+
+```python
+from a2akit import ProviderConfig
+
+provider = ProviderConfig(
+    organization="Acme Corp",
+    url="https://acme.example.com",
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `organization` | `str` | Provider organization name |
+| `url` | `str` | Provider URL |
+
+## SignatureConfig
+
+```python
+from a2akit import SignatureConfig
+
+sig = SignatureConfig(
+    protected="eyJhbGciOiJSUzI1NiJ9",  # Base64url JWS Protected Header
+    signature="abc123",                  # Base64url Signature
+    header={"kid": "key-1"},             # Optional unprotected header
+)
+```
+
+a2akit does **not** compute JWS signatures. Generate them externally and pass the finished values.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `protected` | `str` | *required* | Base64url-encoded JWS Protected Header |
+| `signature` | `str` | *required* | Base64url-encoded Signature |
+| `header` | `dict[str, Any] \| None` | `None` | Unprotected JWS Header |
+
 ## SkillConfig
 
 ```python
@@ -132,8 +174,22 @@ skill = SkillConfig(
     description="Translates text between languages",
     tags=["translation", "nlp"],
     examples=["Translate 'hello' to French"],
+    input_modes=["text/plain"],
+    output_modes=["text/plain", "application/json"],
+    security=[{"bearer": []}],
 )
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `id` | `str` | *required* | Skill identifier |
+| `name` | `str` | *required* | Display name |
+| `description` | `str` | *required* | What the skill does |
+| `tags` | `list[str]` | `[]` | Discovery tags |
+| `examples` | `list[str]` | `[]` | Example prompts |
+| `input_modes` | `list[str] \| None` | `None` | Override global `defaultInputModes` for this skill |
+| `output_modes` | `list[str] \| None` | `None` | Override global `defaultOutputModes` for this skill |
+| `security` | `list[dict[str, list[str]]] \| None` | `None` | Per-skill security requirements |
 
 ## ExtensionConfig
 
