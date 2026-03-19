@@ -152,6 +152,60 @@ Simple health check endpoint.
 {"status": "ok"}
 ```
 
+## Push Notification Config Endpoints
+
+!!! note "Requires `push_notifications` capability"
+    These endpoints return `501` with error code `-32003` if the agent has not enabled `CapabilitiesConfig(push_notifications=True)`.
+
+### POST `/v1/tasks/{task_id}/pushNotificationConfig:set`
+
+Create or update a push notification config for a task.
+
+**Request:**
+
+```json
+{
+  "url": "https://my-app.com/webhook",
+  "token": "my-secret",
+  "id": "optional-config-id",
+  "authentication": {
+    "schemes": ["Bearer"],
+    "credentials": "jwt-token"
+  }
+}
+```
+
+**Response:** `TaskPushNotificationConfig`
+
+```json
+{
+  "taskId": "task-uuid",
+  "pushNotificationConfig": {
+    "id": "config-uuid",
+    "url": "https://my-app.com/webhook",
+    "token": "my-secret"
+  }
+}
+```
+
+### GET `/v1/tasks/{task_id}/pushNotificationConfig/{config_id}`
+
+Get a specific push notification config.
+
+**Response:** `TaskPushNotificationConfig` or 404.
+
+### GET `/v1/tasks/{task_id}/pushNotificationConfig:list`
+
+List all push notification configs for a task.
+
+**Response:** `TaskPushNotificationConfig[]`
+
+### DELETE `/v1/tasks/{task_id}/pushNotificationConfig/{config_id}`
+
+Delete a push notification config.
+
+**Response:** `204 No Content` or 404.
+
 ## GET `/.well-known/agent-card.json`
 
 Agent discovery card with capabilities, skills, and transport information. The URL is derived from the request (proxy-aware via `X-Forwarded-Proto` and `X-Forwarded-Host` headers).
@@ -183,4 +237,5 @@ curl -H "A2A-Version: 0.3.0" http://localhost:8000/v1/message:send ...
 | 409 | -32002 | Task not cancelable |
 | 409 | -32004 | Task in terminal state |
 | 422 | -32602 | Task not accepting messages |
+| 501 | -32003 | Push notifications not supported |
 | 503 | — | TaskManager not initialized |

@@ -85,6 +85,7 @@ Open `http://localhost:8000/chat` — chat with your agent and inspect tasks in 
 - **Multi-turn** — `request_input()` / `request_auth()` for conversational flows
 - **Direct reply** — `reply_directly()` for simple request/response without task tracking
 - **Middleware** — pipeline for auth extraction, header injection, payload sanitization
+- **Push notifications** — webhook delivery for async task updates with SSRF prevention and configurable retries
 - **Lifecycle hooks** — fire-and-forget callbacks on terminal state transitions
 - **Dependency injection** — shared infrastructure with automatic lifecycle management
 - **OpenTelemetry** — opt-in distributed tracing and metrics (`pip install a2akit[otel]`)

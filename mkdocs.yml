@@ -93,6 +93,7 @@ nav:
     - Lifecycle Hooks: guides/hooks.md
     - Cancellation: guides/cancellation.md
     - Multi-Turn Conversations: guides/multi-turn.md
+    - Push Notifications: guides/push-notifications.md
     - LangGraph Integration: guides/langgraph.md
   - API Reference:
     - TaskContext: reference/taskcontext.md
@@ -110,4 +111,5 @@ nav:
     - Dependency Injection: examples/dependency-injection.md
     - Middleware: examples/middleware-secret.md
     - Hook Printer: examples/hook-printer.md
+    - Push Notifications: examples/push-notifications.md
     - LangGraph Worker: examples/langgraph-worker.md

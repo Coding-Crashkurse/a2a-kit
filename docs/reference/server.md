@@ -49,6 +49,13 @@ server = A2AServer(
 | `hooks` | `LifecycleHooks \| None` | `None` | Lifecycle hook callbacks |
 | `settings` | `Settings \| None` | `None` | Override default settings |
 | `dependencies` | `dict[Any, Any] \| None` | `None` | Dependency injection registry |
+| `push_max_retries` | `int \| None` | `None` | Webhook delivery retries (falls back to Settings) |
+| `push_retry_delay` | `float \| None` | `None` | Retry base delay in seconds |
+| `push_timeout` | `float \| None` | `None` | Webhook HTTP timeout in seconds |
+| `push_max_concurrent` | `int \| None` | `None` | Max concurrent webhook deliveries |
+| `push_allow_http` | `bool \| None` | `None` | Allow HTTP webhook URLs (dev only) |
+| `push_allowed_hosts` | `set[str] \| None` | `None` | Hostname allowlist for webhooks |
+| `push_blocked_hosts` | `set[str] \| None` | `None` | Hostname blocklist for webhooks |
 
 ### Storage Backend Resolution
 
@@ -109,7 +116,7 @@ caps = CapabilitiesConfig(streaming=True)
 |-------|------|---------|-------------|
 | `streaming` | `bool` | `False` | Enable SSE streaming (`message:stream`, `tasks:subscribe`) |
 | `state_transition_history` | `bool` | `False` | Advertise state transition history in Agent Card (transitions are always recorded) |
-| `push_notifications` | `bool` | `False` | Push notifications (not yet implemented, raises `NotImplementedError`) |
+| `push_notifications` | `bool` | `False` | Enable push notification config CRUD and webhook delivery |
 | `extended_agent_card` | `bool` | `False` | Extended agent card (not yet implemented, raises `NotImplementedError`) |
 | `extensions` | `list[AgentExtension] \| None` | `None` | Protocol extensions (not yet implemented, raises `NotImplementedError`) |
 

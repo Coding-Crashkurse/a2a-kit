@@ -111,6 +111,30 @@ Subscribe to updates for an existing task.
 !!! note "Requires streaming capability"
     Raises `AgentCapabilityError` if the agent does not support streaming.
 
+### `set_push_config(task_id, *, url, token, config_id, authentication) -> dict`
+
+Set a push notification config for a task.
+
+```python
+await client.set_push_config(
+    task_id,
+    url="https://my-app.com/webhook",
+    token="my-secret",
+)
+```
+
+### `get_push_config(task_id, config_id) -> dict`
+
+Get a push notification config.
+
+### `list_push_configs(task_id) -> list[dict]`
+
+List all push configs for a task.
+
+### `delete_push_config(task_id, config_id) -> None`
+
+Delete a push notification config.
+
 ## Properties
 
 | Property | Type | Description |

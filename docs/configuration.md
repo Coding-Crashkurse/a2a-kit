@@ -13,6 +13,11 @@ a2akit reads settings from environment variables prefixed with `A2AKIT_`. Every 
 | `A2AKIT_BROKER_BUFFER` | `1000` | InMemoryBroker queue depth |
 | `A2AKIT_EVENT_BUFFER` | `200` | InMemoryEventBus fan-out buffer per task |
 | `A2AKIT_LOG_LEVEL` | *(unset)* | Root `a2akit` logger level (e.g. `DEBUG`) |
+| `A2AKIT_PUSH_MAX_RETRIES` | `3` | Max webhook delivery attempts |
+| `A2AKIT_PUSH_RETRY_DELAY` | `1.0` | Base delay between retries (exponential backoff) |
+| `A2AKIT_PUSH_TIMEOUT` | `10.0` | HTTP timeout for webhook delivery |
+| `A2AKIT_PUSH_MAX_CONCURRENT` | `50` | Max concurrent webhook deliveries |
+| `A2AKIT_PUSH_ALLOW_HTTP` | `False` | Allow HTTP webhook URLs (dev only) |
 
 ## Priority
 
@@ -63,6 +68,13 @@ class Settings(BaseSettings):
     broker_buffer: int = 1000
     event_buffer: int = 200
     log_level: str | None = None
+
+    # Push notification settings
+    push_max_retries: int = 3
+    push_retry_delay: float = 1.0
+    push_timeout: float = 10.0
+    push_max_concurrent: int = 50
+    push_allow_http: bool = False
 ```
 
 The `Settings` class uses [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) for automatic environment variable binding.
@@ -76,6 +88,13 @@ These constructor parameters override Settings values:
 | `blocking_timeout_s` | `blocking_timeout` | Blocking timeout in seconds |
 | `cancel_force_timeout_s` | `cancel_force_timeout` | Force-cancel timeout |
 | `max_concurrent_tasks` | `max_concurrent_tasks` | Worker parallelism |
+| `push_max_retries` | `push_max_retries` | Webhook delivery retries |
+| `push_retry_delay` | `push_retry_delay` | Retry base delay |
+| `push_timeout` | `push_timeout` | Webhook HTTP timeout |
+| `push_max_concurrent` | `push_max_concurrent` | Concurrent delivery limit |
+| `push_allow_http` | `push_allow_http` | Allow HTTP webhook URLs |
+| `push_allowed_hosts` | — | Hostname allowlist (constructor only) |
+| `push_blocked_hosts` | — | Hostname blocklist (constructor only) |
 
 !!! tip "Development vs. Production"
     For development, the defaults work well. For production, consider:
