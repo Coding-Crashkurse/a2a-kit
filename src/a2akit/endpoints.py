@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from a2a.types import (
     MessageSendParams,
@@ -114,6 +114,35 @@ def _check_streaming(request: Request) -> None:
     caps = getattr(request.app.state, "capabilities", None)
     if caps is not None and not caps.streaming:
         raise UnsupportedOperationError("Streaming is not supported by this agent")
+
+
+def _check_push_supported(request: Request) -> None:
+    """Raise 501 if push notifications are not enabled."""
+    caps = getattr(request.app.state, "capabilities", None)
+    if not caps or not caps.push_notifications:
+        raise HTTPException(
+            status_code=501,
+            detail={"code": -32003, "message": "Push notifications are not supported"},
+        )
+
+
+def _get_push_store(request: Request) -> Any:
+    """Extract the PushConfigStore from app state."""
+    store = getattr(request.app.state, "push_store", None)
+    if store is None:
+        raise HTTPException(
+            status_code=501,
+            detail={"code": -32003, "message": "Push notifications are not configured"},
+        )
+    return store
+
+
+def _get_storage(request: Request) -> Any:
+    """Extract the Storage from app state."""
+    storage = getattr(request.app.state, "storage", None)
+    if storage is None:
+        raise HTTPException(status_code=503, detail="Storage not initialized")
+    return storage
 
 
 def _validate_ids(params: MessageSendParams) -> MessageSendParams:
@@ -308,36 +337,74 @@ def build_a2a_router() -> APIRouter:
             logger.exception("SSE subscribe stream aborted")
 
     @router.post("/v1/tasks/{task_id}/pushNotificationConfig:set", tags=["Push Notifications"])
-    async def push_config_set(task_id: str = Path()) -> JSONResponse:
-        """Stub: push notification config set — not supported."""
-        return JSONResponse(
-            status_code=501,
-            content={"code": -32003, "message": "Push notifications are not supported"},
-        )
+    async def push_config_set(request: Request, task_id: str = Path()) -> JSONResponse:
+        """Set a push notification config for a task."""
+        _check_push_supported(request)
+        push_store = _get_push_store(request)
+        storage = _get_storage(request)
+        body = await request.json()
+        from a2akit.push.endpoints import _serialize_tpnc, handle_set_config
+
+        result = await handle_set_config(push_store, storage, task_id, body)
+        return JSONResponse(content=_serialize_tpnc(result))
+
+    @router.get(
+        "/v1/tasks/{task_id}/pushNotificationConfig/{config_id}",
+        tags=["Push Notifications"],
+    )
+    async def push_config_get_by_id(
+        request: Request,
+        task_id: str = Path(),
+        config_id: str = Path(),
+    ) -> JSONResponse:
+        """Get a specific push notification config."""
+        _check_push_supported(request)
+        push_store = _get_push_store(request)
+        storage = _get_storage(request)
+        from a2akit.push.endpoints import _serialize_tpnc, handle_get_config
+
+        result = await handle_get_config(push_store, storage, task_id, config_id)
+        return JSONResponse(content=_serialize_tpnc(result))
 
     @router.get("/v1/tasks/{task_id}/pushNotificationConfig", tags=["Push Notifications"])
-    async def push_config_get(task_id: str = Path()) -> JSONResponse:
-        """Stub: push notification config get — not supported."""
-        return JSONResponse(
-            status_code=501,
-            content={"code": -32003, "message": "Push notifications are not supported"},
-        )
+    async def push_config_get(request: Request, task_id: str = Path()) -> JSONResponse:
+        """Get the default push notification config."""
+        _check_push_supported(request)
+        push_store = _get_push_store(request)
+        storage = _get_storage(request)
+        from a2akit.push.endpoints import _serialize_tpnc, handle_get_config
+
+        result = await handle_get_config(push_store, storage, task_id)
+        return JSONResponse(content=_serialize_tpnc(result))
 
     @router.get("/v1/tasks/{task_id}/pushNotificationConfig:list", tags=["Push Notifications"])
-    async def push_config_list(task_id: str = Path()) -> JSONResponse:
-        """Stub: push notification config list — not supported."""
-        return JSONResponse(
-            status_code=501,
-            content={"code": -32003, "message": "Push notifications are not supported"},
-        )
+    async def push_config_list(request: Request, task_id: str = Path()) -> JSONResponse:
+        """List all push notification configs for a task."""
+        _check_push_supported(request)
+        push_store = _get_push_store(request)
+        storage = _get_storage(request)
+        from a2akit.push.endpoints import _serialize_tpnc, handle_list_configs
 
-    @router.delete("/v1/tasks/{task_id}/pushNotificationConfig", tags=["Push Notifications"])
-    async def push_config_delete(task_id: str = Path()) -> JSONResponse:
-        """Stub: push notification config delete — not supported."""
-        return JSONResponse(
-            status_code=501,
-            content={"code": -32003, "message": "Push notifications are not supported"},
-        )
+        configs = await handle_list_configs(push_store, storage, task_id)
+        return JSONResponse(content=[_serialize_tpnc(c) for c in configs])
+
+    @router.delete(
+        "/v1/tasks/{task_id}/pushNotificationConfig/{config_id}",
+        tags=["Push Notifications"],
+    )
+    async def push_config_delete(
+        request: Request,
+        task_id: str = Path(),
+        config_id: str = Path(),
+    ) -> JSONResponse:
+        """Delete a push notification config."""
+        _check_push_supported(request)
+        push_store = _get_push_store(request)
+        storage = _get_storage(request)
+        from a2akit.push.endpoints import handle_delete_config
+
+        await handle_delete_config(push_store, storage, task_id, config_id)
+        return JSONResponse(status_code=204, content=None)
 
     @router.get("/v1/health", tags=["Health"])
     async def health_check() -> dict[str, str]:

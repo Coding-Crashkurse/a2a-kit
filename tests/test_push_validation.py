@@ -1,0 +1,84 @@
+"""Tests for webhook URL validation (anti-SSRF)."""
+
+from __future__ import annotations
+
+from a2akit.push.validation import validate_webhook_url
+
+
+def test_valid_https_url():
+    assert validate_webhook_url("https://example.com/webhook") is True
+
+
+def test_http_rejected_by_default():
+    assert validate_webhook_url("http://example.com/webhook") is False
+
+
+def test_http_allowed_in_dev_mode():
+    assert validate_webhook_url("http://example.com/webhook", allow_http=True) is True
+
+
+def test_private_ip_10_x():
+    assert validate_webhook_url("https://10.0.0.1/webhook") is False
+
+
+def test_private_ip_172_16_x():
+    assert validate_webhook_url("https://172.16.0.1/webhook") is False
+
+
+def test_private_ip_192_168_x():
+    assert validate_webhook_url("https://192.168.1.1/webhook") is False
+
+
+def test_loopback_127_0_0_1():
+    assert validate_webhook_url("https://127.0.0.1/webhook") is False
+
+
+def test_loopback_ipv6():
+    assert validate_webhook_url("https://[::1]/webhook") is False
+
+
+def test_link_local_169_254():
+    assert validate_webhook_url("https://169.254.1.1/webhook") is False
+
+
+def test_public_ip():
+    assert validate_webhook_url("https://93.184.216.34/webhook") is True
+
+
+def test_hostname():
+    assert validate_webhook_url("https://webhook.example.com/path") is True
+
+
+def test_no_scheme():
+    assert validate_webhook_url("example.com/webhook") is False
+
+
+def test_ftp_scheme():
+    assert validate_webhook_url("ftp://example.com/webhook") is False
+
+
+def test_empty_url():
+    assert validate_webhook_url("") is False
+
+
+def test_allowed_hosts_match():
+    assert (
+        validate_webhook_url("https://allowed.com/webhook", allowed_hosts={"allowed.com"}) is True
+    )
+
+
+def test_allowed_hosts_no_match():
+    assert (
+        validate_webhook_url("https://other.com/webhook", allowed_hosts={"allowed.com"}) is False
+    )
+
+
+def test_blocked_hosts_match():
+    assert (
+        validate_webhook_url("https://blocked.com/webhook", blocked_hosts={"blocked.com"}) is False
+    )
+
+
+def test_private_ip_allowed_with_http():
+    """Private IPs should still be blocked even with allow_http=True."""
+    assert validate_webhook_url("http://10.0.0.1/webhook", allow_http=True) is False

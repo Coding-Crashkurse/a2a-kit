@@ -157,5 +157,39 @@ class JsonRpcTransport(Transport):
             async for event in parse_sse_stream(response, unwrap_jsonrpc=True):
                 yield event
 
+    async def set_push_config(self, task_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        """JSON-RPC tasks/pushNotificationConfig/set."""
+        result = await self._call(
+            "tasks/pushNotificationConfig/set",
+            {"taskId": task_id, "pushNotificationConfig": config},
+            task_id=task_id,
+        )
+        return result  # type: ignore[no-any-return]
+
+    async def get_push_config(self, task_id: str, config_id: str | None = None) -> dict[str, Any]:
+        """JSON-RPC tasks/pushNotificationConfig/get."""
+        params: dict[str, Any] = {"id": task_id}
+        if config_id:
+            params["pushNotificationConfigId"] = config_id
+        result = await self._call("tasks/pushNotificationConfig/get", params, task_id=task_id)
+        return result  # type: ignore[no-any-return]
+
+    async def list_push_configs(self, task_id: str) -> list[dict[str, Any]]:
+        """JSON-RPC tasks/pushNotificationConfig/list."""
+        result = await self._call(
+            "tasks/pushNotificationConfig/list",
+            {"id": task_id},
+            task_id=task_id,
+        )
+        return result  # type: ignore[no-any-return]
+
+    async def delete_push_config(self, task_id: str, config_id: str) -> None:
+        """JSON-RPC tasks/pushNotificationConfig/delete."""
+        await self._call(
+            "tasks/pushNotificationConfig/delete",
+            {"id": task_id, "pushNotificationConfigId": config_id},
+            task_id=task_id,
+        )
+
     async def close(self) -> None:
         """No-op; HTTP client lifecycle is managed externally."""

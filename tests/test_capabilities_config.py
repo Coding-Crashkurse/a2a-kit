@@ -23,10 +23,10 @@ def test_streaming_enabled():
     assert caps.streaming is True
 
 
-def test_push_notifications_raises():
-    """push_notifications=True raises NotImplementedError."""
-    with pytest.raises(NotImplementedError, match="push_notifications"):
-        CapabilitiesConfig(push_notifications=True)
+def test_push_notifications_enabled():
+    """push_notifications=True works without error."""
+    caps = CapabilitiesConfig(push_notifications=True)
+    assert caps.push_notifications is True
 
 
 def test_extended_agent_card_raises():

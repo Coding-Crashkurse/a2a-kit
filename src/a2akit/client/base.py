@@ -185,16 +185,28 @@ class A2AClient:
         context_id: str | None = None,
         blocking: bool = True,
         metadata: dict[str, Any] | None = None,
+        push_url: str | None = None,
+        push_token: str | None = None,
     ) -> ClientResult:
-        """Send a text message to the agent."""
+        """Send a text message to the agent.
+
+        If ``push_url`` is provided, a push notification config is created
+        inline with the message submission.
+        """
         parts = [Part(root=TextPart(text=text))]
-        return await self.send_parts(
+        result = await self.send_parts(
             parts,
             task_id=task_id,
             context_id=context_id,
             blocking=blocking,
             metadata=metadata,
         )
+
+        # Inline push config convenience
+        if push_url and result.task_id:
+            await self.set_push_config(result.task_id, url=push_url, token=push_token)
+
+        return result
 
     @traced_client_method(SPAN_CLIENT_SEND)
     async def send_parts(
@@ -320,6 +332,52 @@ class A2AClient:
 
         async for event in transport.subscribe_task(task_id):
             yield event
+
+    async def set_push_config(
+        self,
+        task_id: str,
+        *,
+        url: str,
+        token: str | None = None,
+        config_id: str | None = None,
+        authentication: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Set a push notification config for a task."""
+        transport = self._ensure_connected()
+        config: dict[str, Any] = {"url": url}
+        if token:
+            config["token"] = token
+        if config_id:
+            config["id"] = config_id
+        if authentication:
+            config["authentication"] = authentication
+        return await transport.set_push_config(task_id, config)
+
+    async def get_push_config(
+        self,
+        task_id: str,
+        config_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Get a push notification config."""
+        transport = self._ensure_connected()
+        return await transport.get_push_config(task_id, config_id)
+
+    async def list_push_configs(
+        self,
+        task_id: str,
+    ) -> list[dict[str, Any]]:
+        """List all push configs for a task."""
+        transport = self._ensure_connected()
+        return await transport.list_push_configs(task_id)
+
+    async def delete_push_config(
+        self,
+        task_id: str,
+        config_id: str,
+    ) -> None:
+        """Delete a push notification config."""
+        transport = self._ensure_connected()
+        await transport.delete_push_config(task_id, config_id)
 
     @staticmethod
     def _build_params(

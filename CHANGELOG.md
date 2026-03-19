@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.12] — 2026-03-19
+
+### Added
+- **Push notification config CRUD** — Four new endpoints for managing webhook
+  configurations per task (`set`, `get`, `list`, `delete`), available on both
+  HTTP+JSON and JSON-RPC transports.
+- **Webhook delivery engine** — Background service that POSTs task updates to
+  client-provided webhook URLs on ALL state transitions. Includes
+  exponential-backoff retries, sequential-per-config ordering, concurrent
+  delivery limiting, and graceful shutdown.
+- **URL validation (anti-SSRF)** — Webhook URLs are validated against private IP
+  ranges, loopback addresses, and configurable allow/block lists before delivery.
+- **A2AClient push methods** — `set_push_config()`, `get_push_config()`,
+  `list_push_configs()`, `delete_push_config()`, plus `push_url`/`push_token`
+  convenience parameters on `send()`.
+- **InMemoryPushConfigStore** — In-memory storage backend for push configs.
+- **PushDeliveryEmitter** — Emitter decorator that auto-triggers delivery on
+  every state transition, stacking with HookableEmitter and TracingEmitter.
+- **Security headers** — Webhook delivery includes `X-A2A-Notification-Token`
+  and `Authorization` headers when configured by the client.
+- **Configuration options** — New `A2AServer` parameters and env vars for retry,
+  timeout, concurrency, and SSRF settings (`push_max_retries`, `push_retry_delay`,
+  `push_timeout`, `push_max_concurrent`, `push_allow_http`).
+- **Examples** — `push_notification.py`, `push_webhook_receiver.py`, `push_client.py`.
+
+### Changed
+- `CapabilitiesConfig` no longer raises `NotImplementedError` for
+  `push_notifications=True`.
+- Push notification endpoint stubs (previously returning 501) are now
+  fully functional when `capabilities.push_notifications` is enabled.
+
 ## [0.0.11] — 2026-03-18
 
 ### Added

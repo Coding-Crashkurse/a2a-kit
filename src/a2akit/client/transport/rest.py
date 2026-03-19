@@ -155,5 +155,44 @@ class RestTransport(Transport):
             async for event in parse_sse_stream(response):
                 yield event
 
+    async def set_push_config(self, task_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        """POST /v1/tasks/{task_id}/pushNotificationConfig:set."""
+        response = await self._http.post(
+            self._url(f"/tasks/{task_id}/pushNotificationConfig:set"),
+            json=config,
+            headers=self._headers(),
+        )
+        self._check_error(response, task_id=task_id)
+        return response.json()  # type: ignore[no-any-return]
+
+    async def get_push_config(self, task_id: str, config_id: str | None = None) -> dict[str, Any]:
+        """GET /v1/tasks/{task_id}/pushNotificationConfig[/{config_id}]."""
+        path = f"/tasks/{task_id}/pushNotificationConfig"
+        if config_id:
+            path = f"/tasks/{task_id}/pushNotificationConfig/{config_id}"
+        response = await self._http.get(
+            self._url(path),
+            headers=self._headers(),
+        )
+        self._check_error(response, task_id=task_id)
+        return response.json()  # type: ignore[no-any-return]
+
+    async def list_push_configs(self, task_id: str) -> list[dict[str, Any]]:
+        """GET /v1/tasks/{task_id}/pushNotificationConfig:list."""
+        response = await self._http.get(
+            self._url(f"/tasks/{task_id}/pushNotificationConfig:list"),
+            headers=self._headers(),
+        )
+        self._check_error(response, task_id=task_id)
+        return response.json()  # type: ignore[no-any-return]
+
+    async def delete_push_config(self, task_id: str, config_id: str) -> None:
+        """DELETE /v1/tasks/{task_id}/pushNotificationConfig/{config_id}."""
+        response = await self._http.delete(
+            self._url(f"/tasks/{task_id}/pushNotificationConfig/{config_id}"),
+            headers=self._headers(),
+        )
+        self._check_error(response, task_id=task_id)
+
     async def close(self) -> None:
         """No-op; HTTP client lifecycle is managed externally."""

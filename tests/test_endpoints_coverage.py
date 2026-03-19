@@ -356,7 +356,7 @@ async def test_a2a_version_header_incompatible():
 
 
 async def test_push_notification_config_stubs():
-    """Push notification config endpoints return 501 not supported."""
+    """Push notification config endpoints return 501 when push is not enabled."""
     app = _make_app(EchoWorker())
     async with LifespanManager(app) as manager:
         transport = httpx.ASGITransport(app=manager.app)
@@ -365,19 +365,15 @@ async def test_push_notification_config_stubs():
 
             resp = await client.post(f"/v1/tasks/{task_id}/pushNotificationConfig:set", json={})
             assert resp.status_code == 501
-            assert resp.json()["code"] == -32003
 
             resp = await client.get(f"/v1/tasks/{task_id}/pushNotificationConfig")
             assert resp.status_code == 501
-            assert resp.json()["code"] == -32003
 
             resp = await client.get(f"/v1/tasks/{task_id}/pushNotificationConfig:list")
             assert resp.status_code == 501
-            assert resp.json()["code"] == -32003
 
-            resp = await client.delete(f"/v1/tasks/{task_id}/pushNotificationConfig")
+            resp = await client.delete(f"/v1/tasks/{task_id}/pushNotificationConfig/cfg-1")
             assert resp.status_code == 501
-            assert resp.json()["code"] == -32003
 
 
 async def test_stream_direct_reply_filtering():

@@ -85,6 +85,7 @@ class TaskManager:
     default_blocking_timeout_s: float = 30.0
     cancel_force_timeout_s: float = 60.0
     emitter: EventEmitter | None = None
+    push_store: Any = None
     _background_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
 
     def _track_background(self, coro: Any) -> asyncio.Task[Any]:
@@ -184,6 +185,17 @@ class TaskManager:
         is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
         task = await self._submit_task(context_id, msg)
+
+        # Inline push notification config (A2A spec)
+        if params.configuration and hasattr(params.configuration, "push_notification_config"):
+            pnc = params.configuration.push_notification_config
+            if pnc is not None and self.push_store is not None:
+                from a2akit.push.models import PushNotificationConfig
+
+                config = PushNotificationConfig.model_validate(
+                    pnc if isinstance(pnc, dict) else pnc.model_dump(by_alias=True)
+                )
+                await self.push_store.set_config(task.id, config)
 
         params.message.context_id = context_id
         params.message.task_id = task.id

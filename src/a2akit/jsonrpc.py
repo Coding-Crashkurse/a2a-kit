@@ -81,6 +81,10 @@ def _map_exception_to_error(req_id: Any, exc: Exception) -> JSONResponse:
         return _error_response(req_id, INVALID_PARAMS, "Task does not accept messages")
     if isinstance(exc, UnsupportedOperationError):
         return _error_response(req_id, UNSUPPORTED_OPERATION, str(exc))
+    from a2akit.push.endpoints import PushConfigNotFoundError
+
+    if isinstance(exc, PushConfigNotFoundError):
+        return _error_response(req_id, TASK_NOT_FOUND, str(exc))
     return _error_response(req_id, INTERNAL_ERROR, str(exc))
 
 
@@ -136,10 +140,10 @@ def build_jsonrpc_router() -> APIRouter:
             "tasks/list": _handle_tasks_list,
             "tasks/cancel": _handle_tasks_cancel,
             "tasks/resubscribe": _handle_tasks_resubscribe,
-            "tasks/pushNotificationConfig/set": _handle_push_stub,
-            "tasks/pushNotificationConfig/get": _handle_push_stub,
-            "tasks/pushNotificationConfig/list": _handle_push_stub,
-            "tasks/pushNotificationConfig/delete": _handle_push_stub,
+            "tasks/pushNotificationConfig/set": _handle_push_set,
+            "tasks/pushNotificationConfig/get": _handle_push_get,
+            "tasks/pushNotificationConfig/list": _handle_push_list,
+            "tasks/pushNotificationConfig/delete": _handle_push_delete,
             "health": _handle_health,
         }
 
@@ -335,8 +339,118 @@ async def _handle_health(_request: Request, req_id: Any, _params: dict[str, Any]
     return _result_response(req_id, {"status": "ok"})
 
 
-async def _handle_push_stub(
-    _request: Request, req_id: Any, _params: dict[str, Any]
+def _check_push_supported(request: Request, req_id: Any) -> JSONResponse | None:
+    """Return an error response if push notifications are not enabled, else None."""
+    caps = getattr(request.app.state, "capabilities", None)
+    if not caps or not caps.push_notifications:
+        return _error_response(req_id, PUSH_NOT_SUPPORTED, "Push notifications are not supported")
+    return None
+
+
+def _get_push_store(request: Request) -> Any:
+    """Extract the PushConfigStore from app state."""
+    return getattr(request.app.state, "push_store", None)
+
+
+def _get_storage(request: Request) -> Any:
+    """Extract the Storage from app state."""
+    return getattr(request.app.state, "storage", None)
+
+
+async def _handle_push_set(request: Request, req_id: Any, params: dict[str, Any]) -> JSONResponse:
+    """Handle tasks/pushNotificationConfig/set."""
+    err = _check_push_supported(request, req_id)
+    if err is not None:
+        return err
+
+    task_id = params.get("taskId") or params.get("id")
+    if not task_id:
+        return _error_response(req_id, INVALID_PARAMS, "Missing 'taskId' in params")
+
+    config_data = params.get("pushNotificationConfig")
+    if not config_data:
+        return _error_response(req_id, INVALID_PARAMS, "Missing 'pushNotificationConfig'")
+
+    push_store = _get_push_store(request)
+    storage = _get_storage(request)
+
+    try:
+        from a2akit.push.endpoints import _serialize_tpnc, handle_set_config
+
+        result = await handle_set_config(push_store, storage, task_id, config_data)
+        return _result_response(req_id, _serialize_tpnc(result))
+    except Exception as exc:
+        return _map_exception_to_error(req_id, exc)
+
+
+async def _handle_push_get(request: Request, req_id: Any, params: dict[str, Any]) -> JSONResponse:
+    """Handle tasks/pushNotificationConfig/get."""
+    err = _check_push_supported(request, req_id)
+    if err is not None:
+        return err
+
+    task_id = params.get("id")
+    if not task_id:
+        return _error_response(req_id, INVALID_PARAMS, "Missing 'id' in params")
+
+    config_id = params.get("pushNotificationConfigId")
+    push_store = _get_push_store(request)
+    storage = _get_storage(request)
+
+    try:
+        from a2akit.push.endpoints import _serialize_tpnc, handle_get_config
+
+        result = await handle_get_config(push_store, storage, task_id, config_id)
+        return _result_response(req_id, _serialize_tpnc(result))
+    except Exception as exc:
+        return _map_exception_to_error(req_id, exc)
+
+
+async def _handle_push_list(request: Request, req_id: Any, params: dict[str, Any]) -> JSONResponse:
+    """Handle tasks/pushNotificationConfig/list."""
+    err = _check_push_supported(request, req_id)
+    if err is not None:
+        return err
+
+    task_id = params.get("id")
+    if not task_id:
+        return _error_response(req_id, INVALID_PARAMS, "Missing 'id' in params")
+
+    push_store = _get_push_store(request)
+    storage = _get_storage(request)
+
+    try:
+        from a2akit.push.endpoints import _serialize_tpnc, handle_list_configs
+
+        configs = await handle_list_configs(push_store, storage, task_id)
+        return _result_response(req_id, [_serialize_tpnc(c) for c in configs])
+    except Exception as exc:
+        return _map_exception_to_error(req_id, exc)
+
+
+async def _handle_push_delete(
+    request: Request, req_id: Any, params: dict[str, Any]
 ) -> JSONResponse:
-    """Stub for push notification config methods — always returns not supported."""
-    return _error_response(req_id, PUSH_NOT_SUPPORTED, "Push notifications are not supported")
+    """Handle tasks/pushNotificationConfig/delete."""
+    err = _check_push_supported(request, req_id)
+    if err is not None:
+        return err
+
+    task_id = params.get("id")
+    if not task_id:
+        return _error_response(req_id, INVALID_PARAMS, "Missing 'id' in params")
+
+    config_id = params.get("pushNotificationConfigId")
+    if not config_id:
+        return _error_response(req_id, INVALID_PARAMS, "Missing 'pushNotificationConfigId'")
+
+    push_store = _get_push_store(request)
+    storage = _get_storage(request)
+
+    try:
+        from a2akit.push.endpoints import handle_delete_config
+
+        await handle_delete_config(push_store, storage, task_id, config_id)
+        return _result_response(req_id, None)
+    except Exception as exc:
+        return _map_exception_to_error(req_id, exc)

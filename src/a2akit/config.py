@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     event_buffer: int = 200
     log_level: str | None = None
 
+    # Push notification settings
+    push_max_retries: int = 3
+    push_retry_delay: float = 1.0
+    push_timeout: float = 10.0
+    push_max_concurrent: int = 50
+    push_allow_http: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -64,6 +64,14 @@ class A2AServer:
         settings: Settings | None = None,
         dependencies: dict[Any, Any] | None = None,
         enable_telemetry: bool | None = None,
+        # Push notification options
+        push_max_retries: int | None = None,
+        push_retry_delay: float | None = None,
+        push_timeout: float | None = None,
+        push_max_concurrent: int | None = None,
+        push_allow_http: bool | None = None,
+        push_allowed_hosts: set[str] | None = None,
+        push_blocked_hosts: set[str] | None = None,
     ) -> None:
         """Store configuration for lazy initialization at startup."""
         validate_protocol(agent_card.protocol)
@@ -91,6 +99,22 @@ class A2AServer:
         self._hooks = hooks
         self._enable_telemetry = enable_telemetry
         self._deps = DependencyContainer(dependencies)
+        # Push notification config
+        self._push_max_retries = (
+            push_max_retries if push_max_retries is not None else s.push_max_retries
+        )
+        self._push_retry_delay = (
+            push_retry_delay if push_retry_delay is not None else s.push_retry_delay
+        )
+        self._push_timeout = push_timeout if push_timeout is not None else s.push_timeout
+        self._push_max_concurrent = (
+            push_max_concurrent if push_max_concurrent is not None else s.push_max_concurrent
+        )
+        self._push_allow_http = (
+            push_allow_http if push_allow_http is not None else s.push_allow_http
+        )
+        self._push_allowed_hosts = push_allowed_hosts
+        self._push_blocked_hosts = push_blocked_hosts
 
     def _is_telemetry_enabled(self) -> bool:
         """Determine if OTel instrumentation should be active."""
@@ -166,6 +190,29 @@ class A2AServer:
                 from a2akit.telemetry._emitter import TracingEmitter
 
                 emitter = TracingEmitter(emitter)
+
+            # Push notification setup
+            push_store = None
+            delivery_service = None
+            caps = server._card_config.capabilities
+            if caps.push_notifications:
+                from a2akit.push.delivery import WebhookDeliveryService
+                from a2akit.push.emitter import PushDeliveryEmitter
+                from a2akit.push.store import InMemoryPushConfigStore
+
+                push_store = InMemoryPushConfigStore()
+                delivery_service = WebhookDeliveryService(
+                    max_retries=server._push_max_retries,
+                    retry_base_delay=server._push_retry_delay,
+                    timeout=server._push_timeout,
+                    max_concurrent_deliveries=server._push_max_concurrent,
+                    allow_http=server._push_allow_http,
+                    allowed_hosts=server._push_allowed_hosts,
+                    blocked_hosts=server._push_blocked_hosts,
+                )
+                await delivery_service.startup()
+                emitter = PushDeliveryEmitter(emitter, push_store, delivery_service, storage)
+
             adapter = WorkerAdapter(
                 server._worker,
                 broker,
@@ -185,12 +232,14 @@ class A2AServer:
                 default_blocking_timeout_s=server._blocking_timeout_s,
                 cancel_force_timeout_s=server._cancel_force_timeout_s,
                 emitter=emitter,
+                push_store=push_store,
             )
 
             app.state.task_manager = tm
             app.state.storage = storage
             app.state.broker = broker
             app.state.event_bus = event_bus
+            app.state.push_store = push_store
             middlewares = list(server._middlewares)
             if server._is_telemetry_enabled():
                 from a2akit.telemetry._middleware import TracingMiddleware
@@ -204,10 +253,13 @@ class A2AServer:
                 try:
                     yield
                 finally:
+                    if delivery_service:
+                        await delivery_service.shutdown()
                     del app.state.task_manager
                     del app.state.broker
                     del app.state.storage
                     del app.state.event_bus
+                    del app.state.push_store
                     del app.state.middlewares
                     del app.state.capabilities
                     await server._deps.shutdown()
@@ -274,4 +326,15 @@ def _register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=400,
             content={"code": -32004, "message": str(exc)},
+        )
+
+    from a2akit.push.endpoints import PushConfigNotFoundError
+
+    @app.exception_handler(PushConfigNotFoundError)
+    async def handle_push_config_not_found(
+        _req: Request, exc: PushConfigNotFoundError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=404,
+            content={"code": -32001, "message": str(exc)},
         )

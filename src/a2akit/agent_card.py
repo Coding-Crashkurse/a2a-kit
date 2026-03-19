@@ -75,7 +75,6 @@ class CapabilitiesConfig(BaseModel):
     @model_validator(mode="after")
     def _check_not_yet_supported(self) -> CapabilitiesConfig:
         unsupported = {
-            "push_notifications": self.push_notifications,
             "extended_agent_card": self.extended_agent_card,
             "extensions": bool(self.extensions),
         }
