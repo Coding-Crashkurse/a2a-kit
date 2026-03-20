@@ -303,15 +303,15 @@ async def test_all_hooks_fire_full_lifecycle():
 
 @pytest.mark.asyncio
 async def test_hook_printer_example_runs():
-    """Import and run examples/hook_printer.py end-to-end."""
+    """Import and run examples/hooks/server.py end-to-end."""
     import importlib.util
     import sys
 
     # Compute path at module level to avoid ASYNC240 (no I/O in async functions)
-    example_path = str(_EXAMPLES_DIR / "hook_printer.py")
-    spec = importlib.util.spec_from_file_location("hook_printer", example_path)
+    example_path = str(_EXAMPLES_DIR / "hooks" / "server.py")
+    spec = importlib.util.spec_from_file_location("hooks_server", example_path)
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["hook_printer"] = mod
+    sys.modules["hooks_server"] = mod
     spec.loader.exec_module(mod)
     app = mod.app
 

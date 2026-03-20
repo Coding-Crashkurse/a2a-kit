@@ -1,18 +1,8 @@
 """OpenTelemetry tracing example — traces task processing end-to-end.
 
-Setup:
+Run:
     pip install a2akit[otel]
-    pip install opentelemetry-exporter-otlp
-
-Run Jaeger (Docker):
-    docker run -d --name jaeger \
-      -p 16686:16686 -p 4317:4317 \
-      jaegertracing/all-in-one:latest
-
-Run server:
-    python examples/otel_tracing.py
-
-Send a request, then open http://localhost:16686 to see traces.
+    python -m examples.otel.server
 """
 
 from opentelemetry import trace
@@ -21,14 +11,11 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExport
 
 from a2akit import A2AServer, AgentCardConfig, TaskContext, Worker
 
-# --- OTel Setup (user's responsibility) ---
 provider = TracerProvider()
-# Use ConsoleSpanExporter for demo; replace with OTLPSpanExporter for Jaeger/Grafana
 provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 trace.set_tracer_provider(provider)
 
 
-# --- Normal a2akit code ---
 class MyWorker(Worker):
     async def handle(self, ctx: TaskContext) -> None:
         await ctx.send_status("Thinking...")

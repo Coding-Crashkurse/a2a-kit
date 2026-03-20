@@ -1,4 +1,17 @@
-"""Hook printer example — logs every lifecycle event to stdout."""
+"""Hook printer example — logs every lifecycle event to stdout.
+
+Run:
+    uvicorn examples.hooks.server:app --reload
+
+Expected output for a single message:
+
+    [14:32:01.123] [a1b2c3d4] STATE → working
+    [14:32:01.123] [a1b2c3d4] ⚙ WORKING — task started processing
+    [14:32:01.124] [a1b2c3d4] STATE → working — Thinking...
+    [14:32:01.625] [a1b2c3d4] STATE → working — Almost done...
+    [14:32:02.126] [a1b2c3d4] STATE → completed
+    [14:32:02.126] [a1b2c3d4] ✓ COMPLETED — Processed: hello
+"""
 
 from __future__ import annotations
 
@@ -54,9 +67,6 @@ async def on_terminal(task_id: str, state: TaskState, message: Message | None) -
     print(f"[{_ts()}] [{short_id}] {icon} {state.value.upper()}{_msg_text(message)}")
 
 
-# --- Worker that does a bit of everything to show all hooks ---
-
-
 class DemoWorker(Worker):
     """Processes tasks with intermediate status updates to demonstrate hooks."""
 
@@ -87,16 +97,3 @@ server = A2AServer(
     hooks=hooks,
 )
 app = server.as_fastapi_app()
-
-# Run with: uvicorn examples.hook_printer:app --reload
-#
-# Expected output for a single message:
-#
-# [14:32:01.123] [a1b2c3d4] STATE → working
-# [14:32:01.123] [a1b2c3d4] ⚙ WORKING — task started processing
-# [14:32:01.124] [a1b2c3d4] STATE → working — Thinking...
-# [14:32:01.124] [a1b2c3d4] ⚙ WORKING — task started processing
-# [14:32:01.625] [a1b2c3d4] STATE → working — Almost done...
-# [14:32:01.625] [a1b2c3d4] ⚙ WORKING — task started processing
-# [14:32:02.126] [a1b2c3d4] STATE → completed
-# [14:32:02.126] [a1b2c3d4] ✓ COMPLETED — Processed: hello

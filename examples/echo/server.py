@@ -1,4 +1,8 @@
-"""Simple echo worker — returns the user's input back."""
+"""Simple echo worker — returns the user's input back.
+
+Run:
+    uvicorn examples.echo.server:app --reload
+"""
 
 from a2akit import A2AServer, AgentCardConfig, CapabilitiesConfig, TaskContext, Worker
 

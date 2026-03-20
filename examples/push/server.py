@@ -1,26 +1,7 @@
 """Push notification example — long-running task with webhook delivery.
 
 Run:
-    uvicorn examples.push_notification:app
-
-Send a request with push config:
-    curl -X POST http://localhost:8000/v1/message:send \
-      -H 'Content-Type: application/json' \
-      -d '{
-        "message": {
-          "role": "user",
-          "messageId": "1",
-          "parts": [{"kind": "text", "text": "generate report"}]
-        },
-        "configuration": {
-          "blocking": false
-        }
-      }'
-
-Then set up a push config:
-    curl -X POST http://localhost:8000/v1/tasks/{task_id}/pushNotificationConfig:set \
-      -H 'Content-Type: application/json' \
-      -d '{"url": "http://localhost:9000/webhook", "token": "my-secret-token"}'
+    uvicorn examples.push.server:app
 """
 
 import asyncio
@@ -51,6 +32,6 @@ server = A2AServer(
             push_notifications=True,
         ),
     ),
-    push_allow_http=True,  # Allow HTTP for local dev
+    push_allow_http=True,
 )
 app = server.as_fastapi_app(debug=True)

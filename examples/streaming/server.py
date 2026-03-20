@@ -1,4 +1,8 @@
-"""Streaming worker — emits word-by-word artifacts with progress updates."""
+"""Streaming worker — emits word-by-word artifacts with progress updates.
+
+Run:
+    uvicorn examples.streaming.server:app --reload
+"""
 
 import asyncio
 

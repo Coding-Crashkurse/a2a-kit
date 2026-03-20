@@ -1,11 +1,11 @@
 """Client example — send a task with push notification config.
 
 Start server + webhook receiver first:
-    uvicorn examples.push_notification:app
-    uvicorn examples.push_webhook_receiver:app --port 9000
+    uvicorn examples.push.server:app
+    uvicorn examples.push.webhook_receiver:app --port 9000
 
 Then:
-    python -m examples.push_client
+    python -m examples.push.client
 """
 
 import asyncio
@@ -18,7 +18,6 @@ async def main():
         print(f"Connected to: {client.agent_name}")
         print(f"Push notifications: {client.capabilities.push_notifications}")
 
-        # Send with inline push config
         result = await client.send(
             "Generate the Q1 report",
             blocking=False,
@@ -27,7 +26,6 @@ async def main():
         )
         print(f"Task created: {result.task_id} (state: {result.state})")
 
-        # Poll for completion
         for _ in range(30):
             task = await client.get_task(result.task_id)
             print(f"  Polling... state={task.state}")
@@ -36,7 +34,6 @@ async def main():
                 break
             await asyncio.sleep(1)
 
-        # List push configs
         configs = await client.list_push_configs(result.task_id)
         print(f"\nPush configs: {len(configs)}")
 

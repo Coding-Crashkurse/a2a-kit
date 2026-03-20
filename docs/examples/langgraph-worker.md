@@ -109,7 +109,7 @@ app = server.as_fastapi_app()
 
 ```bash
 pip install a2akit[langgraph]
-uvicorn examples.langgraph_worker:app --reload
+uvicorn examples.langgraph.server:app --reload
 ```
 
 ## Test it

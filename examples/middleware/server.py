@@ -1,4 +1,8 @@
-"""Middleware example — extract secrets from metadata, echo them in the worker."""
+"""Middleware example — extract secrets from metadata, echo them in the worker.
+
+Run:
+    uvicorn examples.middleware.server:app --reload
+"""
 
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ class SecretExtractor(A2AMiddleware):
 
     async def before_dispatch(self, envelope: RequestEnvelope, request: Request) -> None:
         msg_meta: dict[str, Any] = envelope.params.message.metadata or {}
-        envelope.params.message.metadata = msg_meta  # normalise None → dict
+        envelope.params.message.metadata = msg_meta
 
         for key in self.SECRET_KEYS & msg_meta.keys():
             envelope.context[key] = msg_meta.pop(key)

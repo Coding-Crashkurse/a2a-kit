@@ -30,10 +30,10 @@ if __name__ == "__main__":
 
 ```bash
 # Terminal 1: start the echo server
-uvicorn examples.echo:app
+uvicorn examples.echo.server:app
 
 # Terminal 2: run the client
-python -m examples.client_echo
+python -m examples.echo.client
 ```
 
 ## Streaming Client (High-Level)
@@ -64,10 +64,10 @@ if __name__ == "__main__":
 
 ```bash
 # Terminal 1: start the streaming server
-uvicorn examples.streaming:app
+uvicorn examples.streaming.server:app
 
 # Terminal 2: run the client
-python -m examples.client_streaming
+python -m examples.streaming.client
 ```
 
 ## Streaming Client (Low-Level)
@@ -106,8 +106,8 @@ if __name__ == "__main__":
 
 ```bash
 # Terminal 1: start the streaming server
-uvicorn examples.streaming:app
+uvicorn examples.streaming.server:app
 
 # Terminal 2: run the client
-python -m examples.client_streaming_low_level
+python -m examples.streaming.client_low_level
 ```

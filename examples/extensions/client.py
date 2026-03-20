@@ -1,10 +1,10 @@
 """Extension client example — discovers and inspects agent extensions.
 
 Run the server first:
-    uvicorn examples.extensions:app --reload
+    uvicorn examples.extensions.server:app --reload
 
 Then run this client:
-    python -m examples.extensions_client
+    python -m examples.extensions.client
 """
 
 import asyncio
@@ -31,8 +31,6 @@ async def main() -> None:
         else:
             print("\nNo extensions declared.")
 
-        # Send a normal message — extensions are declarative, they don't
-        # change the message flow.
         result = await client.send("Hello from extensions client!")
         print(f"\nResponse: {result.text}")
 

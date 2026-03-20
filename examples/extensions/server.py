@@ -1,7 +1,7 @@
 """Extension declaration example — shows how to declare protocol extensions.
 
 Run:
-    uvicorn examples.extensions:app --reload
+    uvicorn examples.extensions.server:app --reload
 """
 
 from a2akit import (
