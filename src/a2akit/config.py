@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     event_buffer: int = 200
     log_level: str | None = None
 
+    # Event replay buffer for SSE Last-Event-ID
+    event_replay_buffer: int = 100
+
     # Push notification settings
     push_max_retries: int = 3
     push_retry_delay: float = 1.0

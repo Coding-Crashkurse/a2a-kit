@@ -232,6 +232,16 @@ class TaskContext(ABC):
 
     @property
     @abstractmethod
+    def reference_task_ids(self) -> list[str]:
+        """Task IDs referenced by the triggering message for cross-task context."""
+
+    @property
+    @abstractmethod
+    def message_extensions(self) -> list[str]:
+        """Extension URIs declared on the triggering message."""
+
+    @property
+    @abstractmethod
     def deps(self) -> DependencyContainer:
         """Dependency container registered on the server.
 
@@ -351,6 +361,7 @@ class TaskContext(ABC):
         append: bool = False,
         last_chunk: bool = False,
         metadata: dict[str, Any] | None = None,
+        extensions: list[str] | None = None,
     ) -> None:
         """Emit an artifact update event and persist it."""
 
@@ -440,6 +451,8 @@ class TaskContextImpl(TaskContext):
 
         self._deps = deps if deps is not None else DependencyContainer()
         self._accepted_output_modes = accepted_output_modes
+        self._reference_task_ids: list[str] = []
+        self._message_extensions: list[str] = []
 
     def _make_agent_message(
         self, parts: list[Part], *, metadata: dict[str, Any] | None = None
@@ -518,6 +531,16 @@ class TaskContextImpl(TaskContext):
     def data_parts(self) -> list[dict[str, Any]]:
         """All structured data parts from the user message."""
         return _extract_data_parts(self.parts)
+
+    @property
+    def reference_task_ids(self) -> list[str]:
+        """Task IDs referenced by the triggering message."""
+        return self._reference_task_ids
+
+    @property
+    def message_extensions(self) -> list[str]:
+        """Extension URIs declared on the triggering message."""
+        return self._message_extensions
 
     @property
     def deps(self) -> DependencyContainer:
@@ -711,6 +734,7 @@ class TaskContextImpl(TaskContext):
         append: bool = False,
         last_chunk: bool = False,
         metadata: dict[str, Any] | None = None,
+        extensions: list[str] | None = None,
     ) -> None:
         """Emit an artifact update event and persist it."""
         parts = _build_parts(
@@ -727,6 +751,7 @@ class TaskContextImpl(TaskContext):
             description=description,
             parts=parts,
             metadata=metadata or {},
+            extensions=extensions,
         )
         await self._versioned_update(
             self.task_id,

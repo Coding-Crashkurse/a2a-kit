@@ -24,8 +24,10 @@ from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
 from a2akit.hooks import HookableEmitter, LifecycleHooks
 from a2akit.jsonrpc import build_jsonrpc_router
 from a2akit.storage import (
+    ContentTypeNotSupportedError,
     ContextMismatchError,
     InMemoryStorage,
+    InvalidAgentResponseError,
     Storage,
     TaskNotAcceptingMessagesError,
     TaskNotFoundError,
@@ -237,6 +239,7 @@ class A2AServer:
                 cancel_force_timeout_s=server._cancel_force_timeout_s,
                 emitter=emitter,
                 push_store=push_store,
+                input_modes=server._card_config.input_modes,
             )
 
             app.state.task_manager = tm
@@ -275,6 +278,14 @@ class A2AServer:
         fastapi_kwargs.setdefault("description", self._card_config.description)
 
         app = FastAPI(lifespan=lifespan, **fastapi_kwargs)
+
+        # REQ-09: A2A-Version response header on all responses.
+        @app.middleware("http")
+        async def _add_a2a_version_header(request: Request, call_next: Any) -> Any:
+            response = await call_next(request)
+            response.headers["A2A-Version"] = "0.3.0"
+            return response
+
         _register_exception_handlers(app)
 
         if debug:
@@ -332,6 +343,32 @@ def _register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=400,
             content={"code": -32004, "message": str(exc)},
+        )
+
+    @app.exception_handler(ContentTypeNotSupportedError)
+    async def handle_content_type_not_supported(
+        _req: Request, exc: ContentTypeNotSupportedError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": -32005,
+                "message": "Incompatible content types",
+                "data": {"mimeType": exc.mime_type},
+            },
+        )
+
+    @app.exception_handler(InvalidAgentResponseError)
+    async def handle_invalid_agent_response(
+        _req: Request, exc: InvalidAgentResponseError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": -32006,
+                "message": "Invalid agent response",
+                "data": {"detail": exc.detail},
+            },
         )
 
     from a2akit.push.endpoints import PushConfigNotFoundError

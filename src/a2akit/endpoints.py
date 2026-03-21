@@ -237,12 +237,15 @@ def build_a2a_router() -> APIRouter:
         and only contains yield statements.
         """
         first_event, agen = setup
+        sse_id = 0
         try:
-            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event))
+            sse_id += 1
+            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=str(sse_id))
             async for ev in agen:
                 if isinstance(ev, DirectReply):
                     continue
-                yield ServerSentEvent(raw_data=_wrap_stream_event(ev))
+                sse_id += 1
+                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=str(sse_id))
         except Exception:
             logger.exception("SSE stream aborted")
 
@@ -327,12 +330,15 @@ def build_a2a_router() -> APIRouter:
         context where exceptions produce proper HTTP error responses.
         """
         first_event, agen = setup
+        sse_id = 0
         try:
-            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event))
+            sse_id += 1
+            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=str(sse_id))
             async for ev in agen:
                 if isinstance(ev, DirectReply):
                     continue
-                yield ServerSentEvent(raw_data=_wrap_stream_event(ev))
+                sse_id += 1
+                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=str(sse_id))
         except Exception:
             logger.exception("SSE subscribe stream aborted")
 

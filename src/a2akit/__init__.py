@@ -32,8 +32,10 @@ from a2akit.push import (
 from a2akit.server import A2AServer
 from a2akit.storage import (
     ArtifactWrite,
+    ContentTypeNotSupportedError,
     ContextMismatchError,
     InMemoryStorage,
+    InvalidAgentResponseError,
     Storage,
     TaskNotAcceptingMessagesError,
     TaskNotCancelableError,
@@ -58,6 +60,7 @@ __all__ = [
     "CapabilitiesConfig",
     "ClientResult",
     "ClientStreamEvent",
+    "ContentTypeNotSupportedError",
     "ContextMismatchError",
     "DefaultEventEmitter",
     "Dependency",
@@ -72,6 +75,7 @@ __all__ = [
     "InMemoryEventBus",
     "InMemoryPushConfigStore",
     "InMemoryStorage",
+    "InvalidAgentResponseError",
     "LifecycleHooks",
     "ListTasksQuery",
     "ListTasksResult",

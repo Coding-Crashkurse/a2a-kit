@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.16] — 2026-03-21
+
+### Added
+- **A2A v0.3.0 Feature Completeness** — closes all remaining spec gaps:
+  - **REQ-01: Message Field Passthrough** — `referenceTaskIds` and `extensions`
+    on incoming `Message` objects are preserved through storage and exposed via
+    `ctx.reference_task_ids` and `ctx.message_extensions` properties on `TaskContext`.
+  - **REQ-02: Artifact Extensions** — `extensions` on `Artifact` objects are
+    preserved through storage. `emit_artifact()` now accepts an
+    `extensions: list[str] | None` parameter.
+  - **REQ-03: Input Mode Validation** — when `defaultInputModes` is set on the
+    agent card, the framework validates incoming message parts and returns
+    `-32005 ContentTypeNotSupportedError` for incompatible MIME types.
+    New `ContentTypeNotSupportedError` exception class.
+  - **REQ-04: InvalidAgentResponseError** — new `-32006` error code and
+    `InvalidAgentResponseError` exception, mapped in both REST and JSON-RPC
+    transports.
+  - **REQ-05: TaskState.Unknown** — `unknown` state is handled gracefully:
+    not treated as terminal, accepts follow-up messages, transitions to
+    `submitted` on new input.
+  - **REQ-06: SSE Last-Event-ID Replay** — `InMemoryEventBus` now maintains
+    a bounded per-task ring buffer of recent events with monotonic IDs.
+    `subscribe(after_event_id=...)` replays buffered events. SSE frames
+    include `id:` fields. New `Settings.event_replay_buffer` config (default: 100).
+  - **REQ-08: Push Notification Inline Config on message/stream** —
+    `stream_message()` now processes `configuration.pushNotificationConfig`
+    identically to `send_message()`.
+  - **REQ-09: A2A-Version Response Header** — all responses include
+    `A2A-Version: 0.3.0` header.
+  - **REQ-10: Discriminator Field Consistency** — verified `kind` fields
+    on Task, Message, TaskStatusUpdateEvent, and TaskArtifactUpdateEvent
+    are present in all serialized responses.
+- Comprehensive test suite (`test_feature_completeness.py`) covering all 10 REQs.
+
 ## [0.0.15] — 2026-03-21
 
 ### Added

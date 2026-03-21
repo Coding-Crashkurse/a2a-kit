@@ -52,6 +52,22 @@ class ContextMismatchError(Exception):
     """Raised when message contextId doesn't match the task's contextId."""
 
 
+class ContentTypeNotSupportedError(Exception):
+    """Raised when an incoming message part has an incompatible MIME type (A2A -32005)."""
+
+    def __init__(self, mime_type: str) -> None:
+        self.mime_type = mime_type
+        super().__init__(f"Incompatible content type: {mime_type}")
+
+
+class InvalidAgentResponseError(Exception):
+    """Raised when the agent produces an internally inconsistent response (A2A -32006)."""
+
+    def __init__(self, detail: str = "Invalid agent response") -> None:
+        self.detail = detail
+        super().__init__(detail)
+
+
 class ConcurrencyError(Exception):
     """Raised when expected_version doesn't match stored version."""
 

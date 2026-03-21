@@ -9,12 +9,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from a2a.types import (
+    DataPart,
+    FilePart,
     Message,
     MessageSendParams,
     Role,
     Task,
     TaskState,
     TaskStatusUpdateEvent,
+    TextPart,
 )
 
 from a2akit.cancel import cancel_task_in_storage
@@ -22,6 +25,7 @@ from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
 from a2akit.schema import DIRECT_REPLY_KEY, DirectReply, StreamEvent
 from a2akit.storage.base import (
     TERMINAL_STATES,
+    ContentTypeNotSupportedError,
     ContextMismatchError,
     ListTasksQuery,
     ListTasksResult,
@@ -86,6 +90,7 @@ class TaskManager:
     cancel_force_timeout_s: float = 60.0
     emitter: EventEmitter | None = None
     push_store: Any = None
+    input_modes: list[str] = field(default_factory=list)
     _background_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False, repr=False)
 
     def _track_background(self, coro: Any) -> asyncio.Task[Any]:
@@ -101,6 +106,24 @@ class TaskManager:
         if not fut.cancelled() and fut.exception():
             logger.error("Background task failed: %s", fut.exception(), exc_info=fut.exception())
 
+    def _validate_input_modes(self, message: Message) -> None:
+        """Validate message parts against declared input modes (A2A §8.2 -32005)."""
+        if not self.input_modes:
+            return
+        for part in message.parts:
+            root = getattr(part, "root", part)
+            if isinstance(root, TextPart):
+                effective = "text/plain"
+            elif isinstance(root, DataPart):
+                effective = "application/json"
+            elif isinstance(root, FilePart):
+                f = root.file
+                effective = getattr(f, "mime_type", None) or "application/octet-stream"
+            else:
+                continue
+            if effective not in self.input_modes:
+                raise ContentTypeNotSupportedError(effective)
+
     async def _submit_task(self, context_id: str, message: Message) -> Task:
         """Route, validate, and persist a user message submission.
 
@@ -113,6 +136,7 @@ class TaskManager:
         validates preconditions, computes the state transition, and
         persists the message via ``storage.update_task``.
         """
+        self._validate_input_modes(message)
         if not message.task_id:
             return await self.storage.create_task(
                 context_id, message, idempotency_key=message.message_id
@@ -158,6 +182,7 @@ class TaskManager:
         if current not in {
             TaskState.input_required,
             TaskState.auth_required,
+            TaskState.unknown,
         } and not _is_agent_role(getattr(message, "role", None)):
             raise TaskNotAcceptingMessagesError(current)
 
@@ -166,7 +191,11 @@ class TaskManager:
     @staticmethod
     def _compute_state_transition(task: Task) -> TaskState | None:
         """Determine the new state based on current task state."""
-        if task.status.state in {TaskState.input_required, TaskState.auth_required}:
+        if task.status.state in {
+            TaskState.input_required,
+            TaskState.auth_required,
+            TaskState.unknown,
+        }:
             return TaskState.submitted
         return None
 
@@ -258,6 +287,17 @@ class TaskManager:
         is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
         task = await self._submit_task(context_id, msg)
+
+        # REQ-08: Inline push notification config on message/stream.
+        if params.configuration and hasattr(params.configuration, "push_notification_config"):
+            pnc = params.configuration.push_notification_config
+            if pnc is not None and self.push_store is not None:
+                from a2akit.push.models import PushNotificationConfig
+
+                config = PushNotificationConfig.model_validate(
+                    pnc if isinstance(pnc, dict) else pnc.model_dump(by_alias=True)
+                )
+                await self.push_store.set_config(task.id, config)
 
         history_len = getattr(getattr(params, "configuration", None), "history_length", None)
         if history_len is not None:

@@ -3,7 +3,9 @@
 from a2akit.storage.base import (
     ArtifactWrite,
     ConcurrencyError,
+    ContentTypeNotSupportedError,
     ContextMismatchError,
+    InvalidAgentResponseError,
     ListTasksQuery,
     ListTasksResult,
     Storage,
@@ -18,8 +20,10 @@ from a2akit.storage.memory import InMemoryStorage
 __all__ = [
     "ArtifactWrite",
     "ConcurrencyError",
+    "ContentTypeNotSupportedError",
     "ContextMismatchError",
     "InMemoryStorage",
+    "InvalidAgentResponseError",
     "ListTasksQuery",
     "ListTasksResult",
     "Storage",

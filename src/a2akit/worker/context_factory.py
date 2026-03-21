@@ -64,7 +64,7 @@ class ContextFactory:
         # initial_version starts as None; WorkerAdapter seeds ctx._version
         # from the working-state transition's return value before calling
         # the user worker, closing the OCC chain.
-        return TaskContextImpl(
+        ctx = TaskContextImpl(
             task_id=message.task_id or "",
             context_id=message.context_id,
             message_id=message.message_id or "",
@@ -80,6 +80,10 @@ class ContextFactory:
             deps=self._deps,
             accepted_output_modes=accepted,
         )
+        # REQ-01: Extract message-level fields for worker access.
+        ctx._reference_task_ids = list(message.reference_task_ids or [])
+        ctx._message_extensions = list(message.extensions or [])
+        return ctx
 
     @staticmethod
     def _extract_text(parts: list[Part]) -> str:

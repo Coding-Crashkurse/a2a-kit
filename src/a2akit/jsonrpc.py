@@ -17,6 +17,8 @@ from a2akit.middleware import A2AMiddleware, RequestEnvelope
 from a2akit.schema import DirectReply
 from a2akit.storage import ContextMismatchError, TaskNotAcceptingMessagesError
 from a2akit.storage.base import (
+    ContentTypeNotSupportedError,
+    InvalidAgentResponseError,
     ListTasksQuery,
     TaskNotCancelableError,
     TaskNotFoundError,
@@ -82,6 +84,20 @@ def _map_exception_to_error(req_id: Any, exc: Exception) -> JSONResponse:
         return _error_response(req_id, INVALID_PARAMS, "Task does not accept messages")
     if isinstance(exc, UnsupportedOperationError):
         return _error_response(req_id, UNSUPPORTED_OPERATION, str(exc))
+    if isinstance(exc, ContentTypeNotSupportedError):
+        return _error_response(
+            req_id,
+            CONTENT_TYPE_NOT_SUPPORTED,
+            "Incompatible content types",
+            {"mimeType": exc.mime_type},
+        )
+    if isinstance(exc, InvalidAgentResponseError):
+        return _error_response(
+            req_id,
+            INVALID_AGENT_RESPONSE,
+            "Invalid agent response",
+            {"detail": exc.detail},
+        )
     from a2akit.push.endpoints import PushConfigNotFoundError
 
     if isinstance(exc, PushConfigNotFoundError):
@@ -230,12 +246,14 @@ async def _handle_message_send_stream(
         return _map_exception_to_error(req_id, exc)
 
     async def _sse_generator() -> AsyncIterator[str]:
+        sse_id = 0
         try:
             async for event in agen:
                 if isinstance(event, DirectReply):
                     continue
+                sse_id += 1
                 payload = {"jsonrpc": "2.0", "id": req_id, "result": _serialize(event)}
-                yield f"data: {json.dumps(payload)}\n\n"
+                yield f"id: {sse_id}\ndata: {json.dumps(payload)}\n\n"
         except Exception:
             logger.exception("JSON-RPC SSE stream aborted")
 
@@ -324,12 +342,14 @@ async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[
         return _map_exception_to_error(req_id, exc)
 
     async def _sse_generator() -> AsyncIterator[str]:
+        sse_id = 0
         try:
             async for event in agen:
                 if isinstance(event, DirectReply):
                     continue
+                sse_id += 1
                 payload = {"jsonrpc": "2.0", "id": req_id, "result": _serialize(event)}
-                yield f"data: {json.dumps(payload)}\n\n"
+                yield f"id: {sse_id}\ndata: {json.dumps(payload)}\n\n"
         except Exception:
             logger.exception("JSON-RPC SSE resubscribe stream aborted")
 
