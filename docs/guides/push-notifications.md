@@ -69,7 +69,7 @@ async def receive(request: Request, x_a2a_notification_token: str | None = Heade
 
 ```bash
 # After creating a task, register a webhook:
-curl -X POST http://localhost:8000/v1/tasks/{task_id}/pushNotificationConfig:set \
+curl -X POST http://localhost:8000/v1/tasks/{task_id}/pushNotificationConfigs \
   -H 'Content-Type: application/json' \
   -d '{
     "url": "https://my-app.com/webhook",
@@ -173,26 +173,26 @@ Webhook URLs are validated before delivery:
 
 #### Set Config
 ```
-POST /v1/tasks/{task_id}/pushNotificationConfig:set
+POST /v1/tasks/{task_id}/pushNotificationConfigs
 Body: { "url": "...", "token": "...", "id": "...", "authentication": {...} }
 Response: TaskPushNotificationConfig
 ```
 
 #### Get Config
 ```
-GET /v1/tasks/{task_id}/pushNotificationConfig/{config_id}
+GET /v1/tasks/{task_id}/pushNotificationConfigs/{config_id}
 Response: TaskPushNotificationConfig
 ```
 
 #### List Configs
 ```
-GET /v1/tasks/{task_id}/pushNotificationConfig:list
+GET /v1/tasks/{task_id}/pushNotificationConfigs
 Response: TaskPushNotificationConfig[]
 ```
 
 #### Delete Config
 ```
-DELETE /v1/tasks/{task_id}/pushNotificationConfig/{config_id}
+DELETE /v1/tasks/{task_id}/pushNotificationConfigs/{config_id}
 Response: 204 No Content
 ```
 
