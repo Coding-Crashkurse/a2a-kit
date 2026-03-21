@@ -1,10 +1,10 @@
 """Client example — low-level streaming with full event control.
 
 Start the streaming server first:
-    uvicorn examples.streaming:app
+    uvicorn examples.streaming.server:app
 
 Then run this client:
-    python -m examples.client_streaming_low_level
+    python -m examples.streaming.client_low_level
 """
 
 import asyncio

@@ -73,7 +73,7 @@ app = server.as_fastapi_app()
 ## Run it
 
 ```bash
-uvicorn examples.dependency_injection:app --reload
+uvicorn examples.dependency_injection.server:app --reload
 ```
 
 ## Test it

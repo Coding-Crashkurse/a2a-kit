@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.14] — 2026-03-21
+
+### Added
+- **Authenticated Extended Card** (`agent/getAuthenticatedExtendedCard`) — A2A §5.5,
+  §7.10, §9.1. Agents can now serve a richer agent card to authenticated callers.
+  - New `extended_card_provider` parameter on `A2AServer` — async callback that
+    receives the `Request` and returns an `AgentCardConfig`. When set,
+    `supportsAuthenticatedExtendedCard` is automatically set to `True` on the
+    public card.
+  - REST: `GET /v1/card` returns the extended card (404 when not configured).
+  - JSON-RPC: `agent/getAuthenticatedExtendedCard` method with error code `-32007`.
+  - `A2AClient.get_extended_card()` — fetches the extended card via both transports.
+  - `AgentCardConfig.supports_authenticated_extended_card` field (default `False`).
+  - `examples/authenticated_card/` — server and client example.
+  - Comprehensive tests (REST, JSON-RPC, client integration, config flags).
+
+### Changed
+- `CapabilitiesConfig` no longer raises `NotImplementedError` when
+  `extended_agent_card=True`. The field is now accepted without error.
+
+## [0.0.13] — 2026-03-20
+
+### Added
+- **AgentExtension support** — `CapabilitiesConfig` no longer raises
+  `NotImplementedError` when `extensions` is set. Extensions are purely
+  declarative and appear in the agent card under `capabilities.extensions`.
+- **`required` field on `ExtensionConfig`** — mirrors `AgentExtension.required`
+  from A2A v0.3.0 §5.5.2.1. Defaults to `False`; omitted from serialization
+  when falsy.
+- Reorganised examples into topic folders (`examples/<topic>/server.py` +
+  `client.py`). Added missing client examples for middleware, hooks, otel,
+  langgraph, output negotiation, dependency injection, and agent card topics.
+
+### Changed
+- `CapabilitiesConfig` docstring updated — extensions listed as supported.
+- `_to_agent_extension()` now passes `required` through to `AgentExtension`.
+
 ## [0.0.12] — 2026-03-19
 
 ### Added
@@ -27,7 +64,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Configuration options** — New `A2AServer` parameters and env vars for retry,
   timeout, concurrency, and SSRF settings (`push_max_retries`, `push_retry_delay`,
   `push_timeout`, `push_max_concurrent`, `push_allow_http`).
-- **Examples** — `push_notification.py`, `push_webhook_receiver.py`, `push_client.py`.
+- **Examples** — `examples/push/` (server, webhook receiver, client).
 
 ### Changed
 - `CapabilitiesConfig` no longer raises `NotImplementedError` for
@@ -46,7 +83,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - Case-sensitive comparison per RFC 2045.
   - Threaded from `MessageSendConfiguration.acceptedOutputModes` through
     `ContextFactory` → `TaskContextImpl`.
-  - `examples/output_negotiation.py` — reference example with JSON/CSV/text fallback.
+  - `examples/output_negotiation/` — reference example with JSON/CSV/text fallback.
   - Unit and integration tests.
 
 ## [0.0.10] — 2026-03-16
@@ -64,7 +101,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - `input_modes` / `output_modes` — override global defaults per skill.
   - `security` — per-skill security requirements.
 - `ProviderConfig` and `SignatureConfig` exported from `a2akit` top-level.
-- `examples/full_agent_card.py` — reference example with all new fields.
+- `examples/agent_card/` — reference example with all new fields.
 - Comprehensive unit and E2E tests for all new fields.
 
 ## [0.0.9] — 2026-03-15
@@ -114,7 +151,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - Kill-switch — `OTEL_INSTRUMENTATION_A2AKIT_ENABLED=false` env-var to disable at runtime.
   - `enable_telemetry` parameter on `A2AServer` — `None` (auto-detect), `True` (force), `False` (disable).
   - Server-side metrics — `a2akit.task.duration`, `a2akit.task.active`, `a2akit.task.total`, `a2akit.task.errors`.
-  - `examples/otel_tracing.py` — reference example with console span exporter.
+  - `examples/otel/` — reference example with console span exporter.
   - Comprehensive telemetry test suite.
 - `OTEL_ENABLED` flag exported from `a2akit` top-level.
 
@@ -134,7 +171,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - **Client errors**: `AgentNotFoundError`, `AgentCapabilityError`, `NotConnectedError`,
   `TaskNotFoundError`, `TaskNotCancelableError`, `TaskTerminalError`, `ProtocolError`.
 - Client integration tests for both HTTP+JSON and JSON-RPC protocols.
-- **Client examples**: `client_echo.py`, `client_streaming.py`, and `client_streaming_low_level.py`.
+- **Client examples**: `examples/echo/client.py`, `examples/streaming/client.py`, and `examples/streaming/client_low_level.py`.
 - **CapabilitiesConfig**: Explicit capability declaration for agents.
   - `streaming`: Enable/disable streaming support (default: `False`).
   - `push_notifications`: Placeholder, raises `NotImplementedError` when `True`.
@@ -196,7 +233,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - Exactly-once guarantee for `on_terminal` via Storage terminal-state guard.
 - `HookableEmitter` wraps any `EventEmitter` implementation — no changes to the ABC.
 - `hooks` parameter on `A2AServer` for easy opt-in.
-- `examples/hook_printer.py` — reference example demonstrating all lifecycle hooks.
+- `examples/hooks/` — reference example demonstrating all lifecycle hooks.
 - **Middleware system** via `A2AMiddleware` base class and `RequestEnvelope` dataclass.
   - `before_dispatch` — runs before TaskManager processes the request (extract secrets, read headers, enrich context).
   - `after_dispatch` — runs after TaskManager returns (logging, metrics, cleanup). Reverse execution order.
@@ -204,7 +241,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   - `ctx.request_context` exposes transient middleware data inside workers.
   - Streaming endpoints run middleware in setup dependency; `after_dispatch` is skipped by design.
 - `middlewares` parameter on `A2AServer` for easy registration.
-- `examples/middleware_secret.py` — reference example demonstrating secret extraction middleware.
+- `examples/middleware/` — reference example demonstrating secret extraction middleware.
 
 ## [0.0.1] — 2025-XX-XX
 

@@ -1,4 +1,8 @@
-"""Demonstrates all configurable AgentCard fields (A2A v0.3.0)."""
+"""Demonstrates all configurable AgentCard fields (A2A v0.3.0).
+
+Run:
+    uvicorn examples.agent_card.server:app --reload
+"""
 
 from a2a.types import HTTPAuthSecurityScheme
 

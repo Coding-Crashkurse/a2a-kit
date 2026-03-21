@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from a2a.types import AgentExtension
 
 from a2akit.agent_card import CapabilitiesConfig
@@ -29,14 +28,16 @@ def test_push_notifications_enabled():
     assert caps.push_notifications is True
 
 
-def test_extended_agent_card_raises():
-    """extended_agent_card=True raises NotImplementedError."""
-    with pytest.raises(NotImplementedError, match="extended_agent_card"):
-        CapabilitiesConfig(extended_agent_card=True)
+def test_extended_agent_card_accepted():
+    """extended_agent_card=True is now accepted (no longer raises)."""
+    caps = CapabilitiesConfig(extended_agent_card=True)
+    assert caps.extended_agent_card is True
 
 
-def test_extensions_raises():
-    """extensions=[...] raises NotImplementedError."""
+def test_extensions_accepted():
+    """extensions=[...] is accepted without error."""
     ext = AgentExtension(uri="urn:example:ext")
-    with pytest.raises(NotImplementedError, match="extensions"):
-        CapabilitiesConfig(extensions=[ext])
+    caps = CapabilitiesConfig(extensions=[ext])
+    assert caps.extensions is not None
+    assert len(caps.extensions) == 1
+    assert caps.extensions[0].uri == "urn:example:ext"

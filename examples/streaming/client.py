@@ -1,10 +1,10 @@
 """Client example — high-level streaming with stream_text().
 
 Start the streaming server first:
-    uvicorn examples.streaming:app
+    uvicorn examples.streaming.server:app
 
 Then run this client:
-    python -m examples.client_streaming
+    python -m examples.streaming.client
 """
 
 import asyncio

@@ -41,7 +41,7 @@ app = server.as_fastapi_app(debug=True)
 ### Run it
 
 ```bash
-uvicorn examples.push_notification:app
+uvicorn examples.push.server:app
 ```
 
 ## Webhook Receiver
@@ -84,7 +84,7 @@ async def list_notifications():
 ### Run it
 
 ```bash
-uvicorn examples.push_webhook_receiver:app --port 9000
+uvicorn examples.push.webhook_receiver:app --port 9000
 ```
 
 ## Client with Push Config
@@ -128,13 +128,13 @@ if __name__ == "__main__":
 
 ```bash
 # Terminal 1: start the server
-uvicorn examples.push_notification:app
+uvicorn examples.push.server:app
 
 # Terminal 2: start the webhook receiver
-uvicorn examples.push_webhook_receiver:app --port 9000
+uvicorn examples.push.webhook_receiver:app --port 9000
 
 # Terminal 3: run the client
-python -m examples.push_client
+python -m examples.push.client
 ```
 
 The webhook receiver will print task state transitions as they happen.

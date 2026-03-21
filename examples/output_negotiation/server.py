@@ -3,23 +3,8 @@
 Uses ctx.accepts() to check which MIME types the client can handle
 and returns data in the preferred format.
 
-Test with curl:
-
-    # Request JSON
-    curl -X POST http://localhost:8000/v1/message:send \
-      -H 'Content-Type: application/json' \
-      -d '{
-        "message": {"role":"user","messageId":"1","parts":[{"kind":"text","text":"report"}]},
-        "configuration": {"blocking": true, "acceptedOutputModes": ["application/json"]}
-      }'
-
-    # Request plain text
-    curl -X POST http://localhost:8000/v1/message:send \
-      -H 'Content-Type: application/json' \
-      -d '{
-        "message": {"role":"user","messageId":"2","parts":[{"kind":"text","text":"report"}]},
-        "configuration": {"blocking": true, "acceptedOutputModes": ["text/plain"]}
-      }'
+Run:
+    uvicorn examples.output_negotiation.server:app --reload
 """
 
 from a2akit import A2AServer, AgentCardConfig, TaskContext, Worker

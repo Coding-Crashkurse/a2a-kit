@@ -65,7 +65,7 @@ app = server.as_fastapi_app()
 ## Run it
 
 ```bash
-uvicorn examples.middleware_secret:app --reload
+uvicorn examples.middleware.server:app --reload
 ```
 
 ## Test it

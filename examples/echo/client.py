@@ -1,10 +1,10 @@
 """Client example — send a message to the echo server.
 
 Start the echo server first:
-    uvicorn examples.echo:app
+    uvicorn examples.echo.server:app
 
 Then run this client:
-    python -m examples.client_echo
+    python -m examples.echo.client
 """
 
 import asyncio

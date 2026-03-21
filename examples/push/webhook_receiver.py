@@ -1,7 +1,7 @@
 """Webhook receiver — listens for push notifications from A2A agents.
 
 Run:
-    uvicorn examples.push_webhook_receiver:app --port 9000
+    uvicorn examples.push.webhook_receiver:app --port 9000
 """
 
 from __future__ import annotations

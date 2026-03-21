@@ -1,4 +1,9 @@
-"""LangGraph worker — runs a graph with custom streaming, no LLM needed."""
+"""LangGraph worker — runs a graph with custom streaming, no LLM needed.
+
+Run:
+    pip install a2akit[langgraph]
+    uvicorn examples.langgraph.server:app --reload
+"""
 
 import asyncio
 from typing import TypedDict

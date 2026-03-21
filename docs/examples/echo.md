@@ -25,7 +25,7 @@ app = server.as_fastapi_app()
 ## Run it
 
 ```bash
-uvicorn examples.echo:app --reload
+uvicorn examples.echo.server:app --reload
 ```
 
 ## Test it

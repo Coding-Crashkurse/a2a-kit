@@ -6,7 +6,7 @@ Demonstrates:
 3. Constructor injection (worker-specific system prompt)
 
 Run:
-    uvicorn examples.dependency_injection:app --reload
+    uvicorn examples.dependency_injection.server:app --reload
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class HttpClient(Dependency):
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url
-        self._session: str | None = None  # placeholder for a real session
+        self._session: str | None = None
 
     async def startup(self) -> None:
         self._session = f"session-for-{self.base_url}"
@@ -42,10 +42,9 @@ class AppConfig:
 
 class MyWorker(Worker):
     def __init__(self, system_prompt: str = "You are helpful.") -> None:
-        self.system_prompt = system_prompt  # constructor injection
+        self.system_prompt = system_prompt
 
     async def handle(self, ctx: TaskContext) -> None:
-        # Shared infrastructure via DI:
         client = ctx.deps[HttpClient]
         config = ctx.deps[AppConfig]
         api_key = ctx.deps.get("api_key", "not-set")

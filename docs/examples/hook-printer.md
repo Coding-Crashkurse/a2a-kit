@@ -93,7 +93,7 @@ app = server.as_fastapi_app()
 ## Run it
 
 ```bash
-uvicorn examples.hook_printer:app --reload
+uvicorn examples.hooks.server:app --reload
 ```
 
 ## Test it

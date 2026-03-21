@@ -15,7 +15,7 @@ from a2a.types import (
     SecurityScheme,
     TransportProtocol,
 )
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class ProviderConfig(BaseModel):
@@ -52,18 +52,30 @@ class SkillConfig(BaseModel):
 
 
 class ExtensionConfig(BaseModel):
-    """User-friendly extension definition without A2A protocol imports."""
+    """User-friendly extension definition without A2A protocol imports.
+
+    Example::
+
+        ExtensionConfig(
+            uri="urn:example:custom-logging",
+            description="Custom structured logging extension",
+            required=True,
+            params={"log_level": "debug"},
+        )
+    """
 
     uri: str
     description: str | None = None
+    required: bool = False
     params: dict[str, Any] = Field(default_factory=dict)
 
 
 class CapabilitiesConfig(BaseModel):
     """Declares which A2A protocol features this agent supports.
 
-    All capabilities default to False (opt-in). Features not yet
-    implemented by a2akit raise NotImplementedError when set to True.
+    All capabilities default to False (opt-in). Supported features:
+    streaming, push_notifications, state_transition_history,
+    extended_agent_card, extensions.
     """
 
     streaming: bool = False
@@ -71,17 +83,6 @@ class CapabilitiesConfig(BaseModel):
     state_transition_history: bool = False
     extended_agent_card: bool = False
     extensions: list[AgentExtension] | None = None
-
-    @model_validator(mode="after")
-    def _check_not_yet_supported(self) -> CapabilitiesConfig:
-        unsupported = {
-            "extended_agent_card": self.extended_agent_card,
-            "extensions": bool(self.extensions),
-        }
-        for name, enabled in unsupported.items():
-            if enabled:
-                raise NotImplementedError(f"{name} is not yet supported by a2akit.")
-        return self
 
 
 class AgentCardConfig(BaseModel):
@@ -97,6 +98,8 @@ class AgentCardConfig(BaseModel):
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
 
     protocol: Literal["jsonrpc", "http+json"] = "jsonrpc"
+
+    supports_authenticated_extended_card: bool = False
 
     input_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
     output_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
@@ -133,6 +136,7 @@ def _to_agent_extension(ext: ExtensionConfig) -> AgentExtension:
     return AgentExtension(
         uri=ext.uri,
         description=ext.description,
+        required=ext.required or None,  # omit False from serialization
         params=ext.params or None,
     )
 
@@ -179,7 +183,7 @@ def build_agent_card(config: AgentCardConfig, base_url: str) -> AgentCard:
         default_input_modes=config.input_modes,
         default_output_modes=config.output_modes,
         skills=[_to_agent_skill(s) for s in config.skills],
-        supports_authenticated_extended_card=caps.extended_agent_card,
+        supports_authenticated_extended_card=config.supports_authenticated_extended_card,
         provider=AgentProvider(
             organization=config.provider.organization,
             url=config.provider.url,
