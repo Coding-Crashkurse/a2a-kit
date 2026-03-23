@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -467,6 +468,11 @@ class TaskContextImpl(TaskContext):
         self._accepted_output_modes = accepted_output_modes
         self._reference_task_ids: list[str] = []
         self._message_extensions: list[str] = []
+        # Write-batching: buffer artifact writes, flush periodically or on terminal
+        self._pending_artifacts: list[ArtifactWrite] = []
+        self._last_flush: float = time.monotonic()
+        self._flush_interval: float = 0.5  # seconds
+        self._flush_count: int = 10  # max buffered chunks before flush
 
     def _make_agent_message(
         self, parts: list[Part], *, metadata: dict[str, Any] | None = None
@@ -510,6 +516,26 @@ class TaskContextImpl(TaskContext):
                 task_id, expected_version=fresh_version, **kwargs
             )
             self._version = new_version
+
+    async def _maybe_flush(self) -> None:
+        """Flush pending artifacts to DB if interval or count threshold exceeded."""
+        if not self._pending_artifacts:
+            return
+        now = time.monotonic()
+        if (
+            now - self._last_flush >= self._flush_interval
+            or len(self._pending_artifacts) >= self._flush_count
+        ):
+            await self._flush_artifacts()
+
+    async def _flush_artifacts(self) -> None:
+        """Write all buffered artifacts to storage in one call."""
+        if not self._pending_artifacts:
+            return
+        batch = self._pending_artifacts
+        self._pending_artifacts = []
+        await self._versioned_update(self.task_id, artifacts=batch)
+        self._last_flush = time.monotonic()
 
     @property
     def request_context(self) -> dict[str, Any]:
@@ -571,18 +597,21 @@ class TaskContextImpl(TaskContext):
         self, text: str | None = None, *, artifact_id: str = "final-answer"
     ) -> None:
         """Mark the task as completed, optionally with a final text artifact."""
-        artifact_writes: list[ArtifactWrite] | None = None
         artifact: Artifact | None = None
 
         if text is not None:
             final_parts = [Part(TextPart(text=text))]
             artifact = Artifact(artifact_id=artifact_id, parts=final_parts)
-            artifact_writes = [ArtifactWrite(artifact)]
+
+        # Drain pending chunks + optional final artifact = 1 atomic DB write
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+        all_artifacts = pending + ([ArtifactWrite(artifact)] if artifact else [])
 
         await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
-            artifacts=artifact_writes,
+            artifacts=all_artifacts or None,
         )
 
         if artifact is not None:
@@ -612,10 +641,15 @@ class TaskContextImpl(TaskContext):
             metadata={"media_type": "application/json"},
         )
 
+        # Drain pending chunks + JSON artifact = 1 atomic DB write
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+        all_artifacts = [*pending, ArtifactWrite(artifact)]
+
         await self._versioned_update(
             self.task_id,
             state=TaskState.completed,
-            artifacts=[ArtifactWrite(artifact)],
+            artifacts=all_artifacts,
         )
 
         await self._emitter.send_event(
@@ -635,18 +669,25 @@ class TaskContextImpl(TaskContext):
 
     async def fail(self, reason: str) -> None:
         """Mark the task as failed with an error reason."""
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+
         fail_message = self._make_agent_message([Part(TextPart(text=reason))])
         await self._versioned_update(
             self.task_id,
             state=TaskState.failed,
             status_message=fail_message,
             messages=[fail_message],
+            artifacts=pending or None,
         )
         await self._emit_status(TaskState.failed, message=fail_message)
         self._turn_ended = True
 
     async def reject(self, reason: str | None = None) -> None:
         """Reject the task — agent decides not to perform it."""
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+
         reject_text = reason or "Task rejected."
         reject_message = self._make_agent_message([Part(TextPart(text=reject_text))])
         await self._versioned_update(
@@ -654,18 +695,23 @@ class TaskContextImpl(TaskContext):
             state=TaskState.rejected,
             status_message=reject_message,
             messages=[reject_message],
+            artifacts=pending or None,
         )
         await self._emit_status(TaskState.rejected, message=reject_message)
         self._turn_ended = True
 
     async def request_input(self, question: str) -> None:
         """Transition to input-required state."""
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+
         input_message = self._make_agent_message([Part(TextPart(text=question))])
         await self._versioned_update(
             self.task_id,
             state=TaskState.input_required,
             status_message=input_message,
             messages=[input_message],
+            artifacts=pending or None,
         )
         await self._emit_status(TaskState.input_required, message=input_message)
         self._turn_ended = True
@@ -697,18 +743,25 @@ class TaskContextImpl(TaskContext):
         if not parts:
             parts.append(Part(TextPart(text="Authentication required.")))
 
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+
         auth_message = self._make_agent_message(parts)
         await self._versioned_update(
             self.task_id,
             state=TaskState.auth_required,
             status_message=auth_message,
             messages=[auth_message],
+            artifacts=pending or None,
         )
         await self._emit_status(TaskState.auth_required, message=auth_message)
         self._turn_ended = True
 
     async def respond(self, text: str | None = None) -> None:
         """Complete the task with a status message (no artifact created)."""
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+
         msg_parts = [Part(TextPart(text=text))] if text else []
         respond_message = self._make_agent_message(msg_parts)
         await self._versioned_update(
@@ -716,6 +769,7 @@ class TaskContextImpl(TaskContext):
             state=TaskState.completed,
             status_message=respond_message,
             messages=[respond_message],
+            artifacts=pending or None,
         )
         await self._emit_status(TaskState.completed, message=respond_message)
         self._turn_ended = True
@@ -733,6 +787,9 @@ class TaskContextImpl(TaskContext):
         receives a :class:`DirectReply` wrapper so subscribers can
         distinguish this from a normal agent message.
         """
+        pending = self._pending_artifacts
+        self._pending_artifacts = []
+
         message = self._make_agent_message([Part(TextPart(text=text))])
         await self._versioned_update(
             self.task_id,
@@ -740,6 +797,7 @@ class TaskContextImpl(TaskContext):
             status_message=message,
             messages=[message],
             task_metadata={DIRECT_REPLY_KEY: message.message_id},
+            artifacts=pending or None,
         )
         await self._emitter.send_event(self.task_id, DirectReply(message=message))
         await self._emit_status(TaskState.completed, message=message)
@@ -750,12 +808,21 @@ class TaskContextImpl(TaskContext):
         status_msg = None
         if message is not None:
             status_msg = self._make_agent_message([Part(TextPart(text=message))])
+
+        # SSE first — streaming clients see status immediately
+        await self._emit_status(TaskState.working, message=status_msg, final=False)
+
+        # Flush pending artifacts together with the status write
+        if status_msg is not None:
+            pending = self._pending_artifacts
+            self._pending_artifacts = []
             await self._versioned_update(
                 self.task_id,
                 state=TaskState.working,
                 status_message=status_msg,
+                artifacts=pending or None,
             )
-        await self._emit_status(TaskState.working, message=status_msg, final=False)
+            self._last_flush = time.monotonic()
 
     async def emit_artifact(
         self,
@@ -791,10 +858,8 @@ class TaskContextImpl(TaskContext):
             metadata=metadata or {},
             extensions=extensions,
         )
-        await self._versioned_update(
-            self.task_id,
-            artifacts=[ArtifactWrite(artifact, append=append)],
-        )
+
+        # SSE first — streaming clients see every chunk immediately
         await self._emitter.send_event(
             self.task_id,
             TaskArtifactUpdateEvent(
@@ -806,6 +871,10 @@ class TaskContextImpl(TaskContext):
                 last_chunk=last_chunk,
             ),
         )
+
+        # Buffer for DB — polling clients see periodic snapshots
+        self._pending_artifacts.append(ArtifactWrite(artifact, append=append))
+        await self._maybe_flush()
 
     async def emit_text_artifact(
         self,

@@ -267,6 +267,7 @@ class WorkerAdapter:
                 try:
                     await self._user_worker.handle(ctx)
                     if not ctx.turn_ended:
+                        # fail() drains pending artifacts internally
                         await ctx.fail(
                             "Worker returned without calling a lifecycle method "
                             "(complete/fail/reject/respond/request_input/request_auth)"
@@ -274,6 +275,7 @@ class WorkerAdapter:
                 except anyio.get_cancelled_exc_class():
                     if span:
                         span.add_event(EVENT_CANCEL_REQUESTED)
+                    await ctx._flush_artifacts()
                     await self._mark_canceled(self._storage, self._emitter, task_id, context_id)
                 except TaskTerminalStateError:
                     logger.info("Task %s reached terminal state during processing", task_id)
@@ -284,6 +286,7 @@ class WorkerAdapter:
                         from opentelemetry.trace import StatusCode
 
                         span.set_status(StatusCode.ERROR, str(exc))
+                    await ctx._flush_artifacts()
                     await self._mark_failed(emitter, self._storage, task_id, context_id, str(exc))
                 else:
                     if span:

@@ -345,16 +345,24 @@ async def test_versioned_update_concurrency_terminal():
 
 
 async def test_emit_data_artifact():
-    """emit_data_artifact emits a data artifact with correct structure."""
+    """emit_data_artifact emits a data artifact with correct structure.
+
+    Artifact is buffered and written to DB on complete().
+    """
     ctx, storage, event_bus, task = await _make_ctx()
     try:
         await ctx.emit_data_artifact({"result": "ok"}, artifact_id="data-1")
+
+        # Buffered — not yet in DB
+        assert len(ctx._pending_artifacts) == 1
+
+        # complete() drains buffer into terminal write
+        await ctx.complete()
 
         loaded = await storage.load_task(task.id)
         assert len(loaded.artifacts) == 1
         art = loaded.artifacts[0]
         assert art.artifact_id == "data-1"
-        # Check that the data part is present
         data_parts = [p for p in art.parts if isinstance(p.root, DataPart)]
         assert len(data_parts) == 1
         assert data_parts[0].root.data == {"result": "ok"}
@@ -414,5 +422,210 @@ async def test_update_context_no_context_id():
     try:
         await ctx.update_context({"data": "test"})
         # Should not raise, just no-op
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+# --- Write-batching tests ---
+
+
+async def test_artifacts_buffered_not_written_immediately():
+    """Chunks within flush interval stay in buffer, no DB write."""
+    ctx, storage, event_bus, task = await _make_ctx()
+    try:
+        # Set high thresholds so nothing auto-flushes
+        ctx._flush_interval = 999
+        ctx._flush_count = 999
+        ctx._last_flush = __import__("time").monotonic()
+
+        for i in range(5):
+            await ctx.emit_text_artifact(f"chunk {i}", artifact_id="stream", append=True)
+
+        # All 5 in buffer, 0 in DB
+        assert len(ctx._pending_artifacts) == 5
+        loaded = await storage.load_task(task.id)
+        assert len(loaded.artifacts) == 0
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_buffer_flushes_on_count_threshold():
+    """Buffer auto-flushes when chunk count exceeds _flush_count."""
+    ctx, storage, event_bus, task = await _make_ctx()
+    try:
+        ctx._flush_count = 3
+        ctx._flush_interval = 999  # disable time-based flush
+        ctx._last_flush = __import__("time").monotonic()
+
+        await ctx.emit_text_artifact("c1", artifact_id="s", append=True)
+        await ctx.emit_text_artifact("c2", artifact_id="s", append=True)
+        assert len(ctx._pending_artifacts) == 2  # below threshold
+
+        await ctx.emit_text_artifact("c3", artifact_id="s", append=True)
+        # Hit threshold → flushed
+        assert len(ctx._pending_artifacts) == 0
+
+        loaded = await storage.load_task(task.id)
+        assert len(loaded.artifacts) >= 1
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_buffer_flushes_on_time_threshold():
+    """Buffer auto-flushes when time since last flush exceeds interval."""
+    ctx, storage, event_bus, task = await _make_ctx()
+    try:
+        ctx._flush_count = 999  # disable count-based flush
+        ctx._flush_interval = 0.0  # always flush on time
+        ctx._last_flush = 0.0  # force elapsed > interval
+
+        await ctx.emit_text_artifact("chunk", artifact_id="s", append=True)
+        # Time threshold exceeded → flushed immediately
+        assert len(ctx._pending_artifacts) == 0
+
+        loaded = await storage.load_task(task.id)
+        assert len(loaded.artifacts) >= 1
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_complete_drains_buffer():
+    """complete() writes all pending chunks + final artifact in 1 DB call."""
+    ctx, storage, event_bus, task = await _make_ctx()
+    try:
+        ctx._flush_interval = 999
+        ctx._flush_count = 999
+        ctx._last_flush = __import__("time").monotonic()
+
+        await ctx.emit_text_artifact("chunk 1", artifact_id="stream", append=True)
+        await ctx.emit_text_artifact("chunk 2", artifact_id="stream", append=True)
+        assert len(ctx._pending_artifacts) == 2
+
+        await ctx.complete("Done")
+
+        assert len(ctx._pending_artifacts) == 0
+        loaded = await storage.load_task(task.id)
+        assert loaded.status.state == TaskState.completed
+        # stream chunks + final artifact
+        assert len(loaded.artifacts) >= 1
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_fail_drains_buffer():
+    """fail() persists pending artifacts alongside the failure."""
+    ctx, storage, event_bus, task = await _make_ctx()
+    try:
+        ctx._flush_interval = 999
+        ctx._flush_count = 999
+        ctx._last_flush = __import__("time").monotonic()
+
+        await ctx.emit_text_artifact("partial", artifact_id="stream", append=True)
+        await ctx.fail("something went wrong")
+
+        assert len(ctx._pending_artifacts) == 0
+        loaded = await storage.load_task(task.id)
+        assert loaded.status.state == TaskState.failed
+        assert len(loaded.artifacts) >= 1
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_send_status_flushes_pending_with_status():
+    """send_status with text piggybacks pending artifacts into the DB write."""
+    ctx, storage, event_bus, task = await _make_ctx()
+    try:
+        ctx._flush_interval = 999
+        ctx._flush_count = 999
+        ctx._last_flush = __import__("time").monotonic()
+
+        await ctx.emit_text_artifact("chunk", artifact_id="s", append=True)
+        assert len(ctx._pending_artifacts) == 1
+
+        await ctx.send_status("thinking...")
+
+        # Pending flushed together with the status write
+        assert len(ctx._pending_artifacts) == 0
+        loaded = await storage.load_task(task.id)
+        assert len(loaded.artifacts) >= 1
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_sse_fires_before_db_for_artifacts():
+    """SSE event is sent before any DB write for emit_artifact."""
+    ctx, _storage, event_bus, _task = await _make_ctx()
+    try:
+        ctx._flush_interval = 999
+        ctx._flush_count = 999
+        ctx._last_flush = __import__("time").monotonic()
+
+        call_order: list[str] = []
+        original_send_event = ctx._emitter.send_event
+        original_update_task = ctx._emitter.update_task
+
+        async def tracked_send_event(*args, **kwargs):
+            call_order.append("send_event")
+            return await original_send_event(*args, **kwargs)
+
+        async def tracked_update_task(*args, **kwargs):
+            call_order.append("update_task")
+            return await original_update_task(*args, **kwargs)
+
+        ctx._emitter.send_event = tracked_send_event
+        ctx._emitter.update_task = tracked_update_task
+
+        await ctx.emit_text_artifact("hello", artifact_id="test")
+
+        # SSE sent, no DB write (buffered, below threshold)
+        assert call_order == ["send_event"]
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_terminal_db_before_sse():
+    """complete() writes DB before sending SSE with final=True."""
+    ctx, _storage, event_bus, _task = await _make_ctx()
+    try:
+        call_order: list[str] = []
+        original_send_event = ctx._emitter.send_event
+        original_update_task = ctx._emitter.update_task
+
+        async def tracked_send_event(*args, **kwargs):
+            call_order.append("send_event")
+            return await original_send_event(*args, **kwargs)
+
+        async def tracked_update_task(*args, **kwargs):
+            call_order.append("update_task")
+            return await original_update_task(*args, **kwargs)
+
+        ctx._emitter.send_event = tracked_send_event
+        ctx._emitter.update_task = tracked_update_task
+
+        await ctx.complete("done")
+
+        assert call_order[0] == "update_task"
+        assert "send_event" in call_order[1:]
+    finally:
+        await event_bus.__aexit__(None, None, None)
+
+
+async def test_polling_sees_terminal_with_all_artifacts():
+    """Polling after complete() sees all artifacts including buffered chunks."""
+    ctx, storage, event_bus, task = await _make_ctx()
+    try:
+        ctx._flush_interval = 999
+        ctx._flush_count = 999
+        ctx._last_flush = __import__("time").monotonic()
+
+        for i in range(3):
+            await ctx.emit_text_artifact(f"word{i}", artifact_id="stream", append=True)
+
+        await ctx.complete("final answer")
+
+        loaded = await storage.load_task(task.id)
+        assert loaded.status.state == TaskState.completed
+        # 3 streamed chunks + 1 final artifact
+        assert len(loaded.artifacts) >= 1
     finally:
         await event_bus.__aexit__(None, None, None)
