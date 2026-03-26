@@ -13,6 +13,16 @@ jobs:
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -21,10 +31,12 @@ jobs:
       - uses: astral-sh/setup-uv@v4
         with: { version: "latest" }
       - run: uv python install ${{ matrix.python-version }}
-      - run: uv sync --dev
+      - run: uv sync --dev --extra redis
       - name: Lint
         run: uv run ruff check src/ tests/
       - name: Test
+        env:
+          A2AKIT_TEST_REDIS_URL: "redis://localhost:6379/0"
         run: uv run pytest --cov=a2akit --cov-fail-under=80
 
   publish:
