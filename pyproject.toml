@@ -45,11 +45,11 @@ otel = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/markuslang1987/a2akit"
-Documentation = "https://markuslang1987.github.io/a2akit/"
-Repository = "https://github.com/markuslang1987/a2akit"
-Changelog = "https://github.com/markuslang1987/a2akit/blob/main/CHANGELOG.md"
-Issues = "https://github.com/markuslang1987/a2akit/issues"
+Homepage = "https://github.com/Coding-Crashkurse/a2akit"
+Documentation = "https://coding-crashkurse.github.io/a2akit/"
+Repository = "https://github.com/Coding-Crashkurse/a2akit"
+Changelog = "https://github.com/Coding-Crashkurse/a2akit/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Coding-Crashkurse/a2akit/issues"
 
 [dependency-groups]
 docs = [
