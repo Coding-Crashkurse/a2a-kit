@@ -20,8 +20,6 @@ from a2akit.middleware import A2AMiddleware, RequestEnvelope
 from a2akit.schema import DirectReply, StreamEvent
 from a2akit.storage.base import (
     ListTasksQuery,
-    TaskNotCancelableError,
-    TaskNotFoundError,
     UnsupportedOperationError,
 )
 
@@ -104,7 +102,10 @@ def _get_tm(request: Request) -> TaskManager:
     """Extract the TaskManager from app state."""
     tm: TaskManager | None = getattr(request.app.state, "task_manager", None)
     if tm is None:
-        raise HTTPException(status_code=503, detail="TaskManager not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": -32603, "message": "TaskManager not initialized"},
+        )
     return tm
 
 
@@ -140,7 +141,10 @@ def _get_storage(request: Request) -> Any:
     """Extract the Storage from app state."""
     storage = getattr(request.app.state, "storage", None)
     if storage is None:
-        raise HTTPException(status_code=503, detail="Storage not initialized")
+        raise HTTPException(
+            status_code=503,
+            detail={"code": -32603, "message": "Storage not initialized"},
+        )
     return storage
 
 
@@ -299,20 +303,11 @@ def build_a2a_router() -> APIRouter:
     ) -> JSONResponse:
         """Cancel a task by ID."""
         tm = _get_tm(request)
-        try:
-            result = await tm.cancel_task(task_id)
-            result = _sanitize_task_for_client(result)
-            return JSONResponse(
-                content=result.model_dump(mode="json", by_alias=True, exclude_none=True)
-            )
-        except TaskNotFoundError as err:
-            raise HTTPException(
-                status_code=404, detail={"code": -32001, "message": "Task not found"}
-            ) from err
-        except TaskNotCancelableError as err:
-            raise HTTPException(
-                status_code=409, detail={"code": -32002, "message": "Task is not cancelable"}
-            ) from err
+        result = await tm.cancel_task(task_id)
+        result = _sanitize_task_for_client(result)
+        return JSONResponse(
+            content=result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
 
     @router.post(
         "/v1/tasks/{task_id}:subscribe", response_class=EventSourceResponse, tags=["Tasks"]
@@ -396,7 +391,7 @@ def build_a2a_router() -> APIRouter:
         from a2akit.push.endpoints import handle_delete_config
 
         await handle_delete_config(push_store, storage, task_id, config_id)
-        return JSONResponse(status_code=204, content=None)
+        return JSONResponse(content=None)
 
     @router.get("/v1/card", tags=["Discovery"])
     async def get_authenticated_extended_card(request: Request) -> JSONResponse:

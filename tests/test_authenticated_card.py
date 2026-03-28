@@ -75,7 +75,7 @@ class TestRestExtendedCard:
                 resp = await client.get("/v1/card")
                 assert resp.status_code == 404
                 data = resp.json()
-                assert data["detail"]["code"] == -32007
+                assert data["code"] == -32007
 
     async def test_public_card_reflects_flag(self):
         app = _make_app(with_provider=True)

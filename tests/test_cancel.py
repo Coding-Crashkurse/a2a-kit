@@ -12,7 +12,8 @@ async def test_cancel_not_found(client):
     assert resp.status_code == 404
 
     data = resp.json()
-    assert "detail" in data
+    assert data["code"] == -32001
+    assert "message" in data
 
 
 @pytest.mark.asyncio
@@ -27,13 +28,14 @@ async def test_cancel_terminal_task(client, make_send_params):
     task_id = task["id"]
 
     # Verify the task is completed
-    assert task["status"]["state"] == "completed", (
-        f"Expected completed state, got {task['status']['state']}"
-    )
+    assert (
+        task["status"]["state"] == "completed"
+    ), f"Expected completed state, got {task['status']['state']}"
 
     # Attempt to cancel the completed task -- should get 409 Conflict
     cancel_resp = await client.post(f"/v1/tasks/{task_id}:cancel")
     assert cancel_resp.status_code == 409
 
     data = cancel_resp.json()
-    assert "detail" in data
+    assert "code" in data
+    assert "message" in data

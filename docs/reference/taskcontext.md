@@ -2,6 +2,34 @@
 
 `TaskContext` is the execution context passed to `Worker.handle()`. It provides the complete interface for interacting with tasks — reading input, emitting results, controlling lifecycle, and accessing dependencies.
 
+## Quick Reference
+
+| Method | Target State | Description |
+|--------|-------------|-------------|
+| `complete(text)` | `completed` | Finish with optional text artifact |
+| `complete_json(data)` | `completed` | Finish with JSON data artifact |
+| `respond(text)` | `completed` | Finish with status message only (no artifact) |
+| `reply_directly(text)` | `completed` | Return Message directly, skip task tracking |
+| `fail(reason)` | `failed` | Mark task as failed |
+| `reject(reason)` | `rejected` | Agent declines the task |
+| `request_input(question)` | `input-required` | Pause and ask user for more info |
+| `request_auth(details)` | `auth-required` | Pause and ask user for credentials |
+| `send_status(message)` | *(stays working)* | Emit intermediate progress update |
+| `emit_text_artifact(text)` | *(stays working)* | Stream a text chunk |
+| `emit_data_artifact(data)` | *(stays working)* | Stream structured data |
+| `emit_artifact(...)` | *(stays working)* | General-purpose artifact emission |
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `user_text` | `str` | User's input as plain text |
+| `parts` | `list` | Raw A2A message parts |
+| `task_id` | `str` | Current task UUID |
+| `context_id` | `str \| None` | Conversation identifier |
+| `is_cancelled` | `bool` | Whether cancellation was requested |
+| `history` | `list[HistoryMessage]` | Previous messages in this task |
+| `previous_artifacts` | `list[PreviousArtifact]` | Artifacts from prior turns |
+| `deps` | `DependencyContainer` | Injected dependencies |
+
 ::: a2akit.worker.base.TaskContext
     options:
       members:

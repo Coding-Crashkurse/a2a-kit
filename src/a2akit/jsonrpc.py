@@ -334,10 +334,11 @@ async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[
     if not task_id:
         return _error_response(req_id, INVALID_PARAMS, "Missing 'id' in params")
 
+    after_event_id = params.get("lastEventId")
     tm = _get_tm(request)
 
     try:
-        agen = tm.subscribe_task(task_id)
+        agen = tm.subscribe_task(task_id, after_event_id=after_event_id)
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 

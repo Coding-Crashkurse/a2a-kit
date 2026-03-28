@@ -69,7 +69,8 @@ async def test_cancel_endpoint_not_found():
             resp = await client.post("/v1/tasks/nonexistent-id:cancel")
             assert resp.status_code == 404
             data = resp.json()
-            assert "detail" in data
+            assert data["code"] == -32001
+            assert "message" in data
 
 
 async def test_cancel_endpoint_not_cancelable():

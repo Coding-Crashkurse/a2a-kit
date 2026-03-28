@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentCard, ChatMessage, Task } from "../lib/types";
 import {
+  cancelTask,
   extractPartsText,
   extractTextFromTask,
+  fetchTaskById,
   isJsonRpc,
   isStreaming as isStreamingAgent,
   sendBlocking,
@@ -22,6 +24,7 @@ export function ChatView({ card }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const taskIdRef = useRef<string | null>(null);
   const contextIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
@@ -68,6 +71,9 @@ export function ChatView({ card }: Props) {
     setInput("");
     setSending(true);
 
+    const ac = new AbortController();
+    abortRef.current = ac;
+
     const jsonRpc = isJsonRpc(card);
     const streaming = isStreamingAgent(card);
     const agentUrl = card.url || "";
@@ -81,34 +87,77 @@ export function ChatView({ card }: Props) {
     if (contextIdRef.current) msg.contextId = contextIdRef.current;
 
     const params: Record<string, unknown> = { message: msg };
-    if (!streaming) {
-      params.configuration = { blocking: true };
-    }
 
     try {
       if (streaming) {
-        await handleStreaming(agentUrl, params, jsonRpc);
+        await handleStreaming(agentUrl, params, jsonRpc, ac.signal);
       } else {
-        await handleBlocking(agentUrl, params, jsonRpc);
+        await handleBlocking(agentUrl, params, jsonRpc, ac.signal);
       }
     } catch (err) {
-      addMsg("error", "Error: " + (err instanceof Error ? err.message : String(err)));
+      if (err instanceof DOMException && err.name === "AbortError") {
+        // Cancelled by user — don't show error
+      } else {
+        addMsg("error", "Error: " + (err instanceof Error ? err.message : String(err)));
+      }
     }
 
+    abortRef.current = null;
     setSending(false);
   }, [input, sending, card, addMsg, updateIds]);
 
+  const handleCancel = useCallback(async () => {
+    if (!card) return;
+    const tid = taskIdRef.current;
+    // Abort the SSE stream / polling
+    abortRef.current?.abort();
+    // Clear task refs so the next message starts a new task
+    taskIdRef.current = null;
+    contextIdRef.current = null;
+    // Cancel the task on the server
+    if (tid) {
+      try {
+        await cancelTask(card, tid);
+        addMsg("status", "Task canceled.");
+      } catch {
+        addMsg("status", "Cancel request sent.");
+      }
+    }
+  }, [card, addMsg]);
+
   const handleBlocking = useCallback(
-    async (agentUrl: string, params: Record<string, unknown>, jsonRpc: boolean) => {
+    async (agentUrl: string, params: Record<string, unknown>, jsonRpc: boolean, signal?: AbortSignal) => {
       addMsg("status", "Thinking...");
-      const data = await sendBlocking({ agentUrl, jsonRpc, params });
 
-      // Remove thinking status
-      setMessages((prev) => prev.filter((m) => !(m.type === "status" && m.text === "Thinking...")));
+      // Submit non-blocking so we get the task ID immediately for cancel support
+      const initial = await sendBlocking({ agentUrl, jsonRpc, params }, signal);
+      if (initial.id) taskIdRef.current = initial.id;
+      if (initial.contextId) contextIdRef.current = initial.contextId;
+      updateIds(initial);
 
-      handleTaskOrMessage(data);
+      const TERMINAL = new Set(["completed", "failed", "canceled", "rejected"]);
+      const state = initial.status?.state || "";
+
+      if (!initial.id || TERMINAL.has(state) || initial.kind === "message") {
+        setMessages((prev) => prev.filter((m) => !(m.type === "status" && m.text === "Thinking...")));
+        handleTaskOrMessage(initial);
+        return;
+      }
+
+      // Poll until terminal state
+      while (!signal?.aborted) {
+        await new Promise((r) => setTimeout(r, 500));
+        if (signal?.aborted) break;
+        const task = await fetchTaskById(card!, initial.id);
+        const s = task.status?.state || "";
+        if (TERMINAL.has(s)) {
+          setMessages((prev) => prev.filter((m) => !(m.type === "status" && m.text === "Thinking...")));
+          handleTaskOrMessage(task);
+          return;
+        }
+      }
     },
-    [addMsg, updateIds],
+    [card, addMsg, updateIds],
   );
 
   const handleTaskOrMessage = useCallback(
@@ -145,7 +194,7 @@ export function ChatView({ card }: Props) {
   );
 
   const handleStreaming = useCallback(
-    async (agentUrl: string, params: Record<string, unknown>, jsonRpc: boolean) => {
+    async (agentUrl: string, params: Record<string, unknown>, jsonRpc: boolean, signal?: AbortSignal) => {
       let agentText = "";
       let agentMsgId: string | null = null;
       let lastState = "";
@@ -191,7 +240,7 @@ export function ChatView({ card }: Props) {
         onError(text) {
           addMsg("error", text);
         },
-      });
+      }, signal);
 
       if (!agentMsgId && !agentText) {
         addMsg("status", "Stream completed (no text content)");
@@ -293,9 +342,15 @@ export function ChatView({ card }: Props) {
           rows={1}
           disabled={sending}
         />
-        <button className="btn btn-primary" onClick={handleSend} disabled={sending || !card}>
-          Send
-        </button>
+        {sending ? (
+          <button className="btn btn-cancel" onClick={handleCancel}>
+            Cancel
+          </button>
+        ) : (
+          <button className="btn btn-primary" onClick={handleSend} disabled={!card}>
+            Send
+          </button>
+        )}
       </div>
     </>
   );

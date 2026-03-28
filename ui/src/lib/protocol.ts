@@ -60,7 +60,7 @@ interface SendParams {
   params: Record<string, unknown>;
 }
 
-export async function sendBlocking({ agentUrl, jsonRpc, params }: SendParams): Promise<Task> {
+export async function sendBlocking({ agentUrl, jsonRpc, params }: SendParams, signal?: AbortSignal): Promise<Task> {
   let url: string, body: string;
   if (jsonRpc) {
     url = agentUrl;
@@ -74,6 +74,7 @@ export async function sendBlocking({ agentUrl, jsonRpc, params }: SendParams): P
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body,
+    signal,
   });
 
   if (!resp.ok) {
@@ -100,6 +101,7 @@ export interface StreamCallbacks {
 export async function sendStreamingRequest(
   { agentUrl, jsonRpc, params }: SendParams,
   cb: StreamCallbacks,
+  signal?: AbortSignal,
 ): Promise<void> {
   let url: string, body: string;
   if (jsonRpc) {
@@ -114,6 +116,7 @@ export async function sendStreamingRequest(
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
     body,
+    signal,
   });
 
   if (!resp.ok) {
@@ -214,6 +217,28 @@ export async function fetchTaskById(card: AgentCard, taskId: string): Promise<Ta
     return rpc.result as Task;
   } else {
     const resp = await fetch(agentUrl + "/tasks/" + encodeURIComponent(taskId) + "?historyLength=100", {
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return (await resp.json()) as Task;
+  }
+}
+
+export async function cancelTask(card: AgentCard, taskId: string): Promise<Task> {
+  const agentUrl = card.url || "";
+  if (isJsonRpc(card)) {
+    const resp = await fetch(agentUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tasks/cancel", params: { id: taskId } }),
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const rpc = await resp.json();
+    if (rpc.error) throw new Error("JSON-RPC " + rpc.error.code + ": " + rpc.error.message);
+    return rpc.result as Task;
+  } else {
+    const resp = await fetch(agentUrl + "/tasks/" + encodeURIComponent(taskId) + ":cancel", {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
     });
     if (!resp.ok) throw new Error("HTTP " + resp.status);

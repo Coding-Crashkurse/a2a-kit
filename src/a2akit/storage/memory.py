@@ -190,7 +190,8 @@ class InMemoryStorage(Storage[ContextT]):
         if expected_version is not None and expected_version != current_version:
             raise ConcurrencyError(
                 f"Version mismatch for task {task_id}: "
-                f"expected {expected_version}, current {current_version}"
+                f"expected {expected_version}, current {current_version}",
+                current_version=current_version,
             )
 
         if state is not None and task.status.state in TERMINAL_STATES:

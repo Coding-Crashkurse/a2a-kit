@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -32,6 +32,7 @@ from a2akit.storage import (
     InvalidAgentResponseError,
     Storage,
     TaskNotAcceptingMessagesError,
+    TaskNotCancelableError,
     TaskNotFoundError,
     TaskTerminalStateError,
     UnsupportedOperationError,
@@ -408,17 +409,25 @@ class A2AServer:
 def _register_exception_handlers(app: FastAPI) -> None:
     """Register JSON-RPC style exception handlers for A2A storage errors."""
 
+    @app.exception_handler(HTTPException)
+    async def handle_http_exception(_req: Request, exc: HTTPException) -> JSONResponse:
+        """Normalise all HTTPException responses to ``{"code", "message"}``."""
+        detail = exc.detail
+        if isinstance(detail, dict) and "code" in detail and "message" in detail:
+            content = detail
+        elif isinstance(detail, str):
+            content = {"code": -32600, "message": detail}
+        else:
+            content = {"code": -32600, "message": str(detail)}
+        return JSONResponse(status_code=exc.status_code, content=content)
+
     @app.exception_handler(AuthenticationRequiredError)
     async def handle_auth_required(
         _req: Request, exc: AuthenticationRequiredError
     ) -> JSONResponse:
         return JSONResponse(
             status_code=401,
-            content={
-                "jsonrpc": "2.0",
-                "error": {"code": -32603, "message": str(exc)},
-                "id": None,
-            },
+            content={"code": -32603, "message": str(exc)},
             headers={"WWW-Authenticate": f'{exc.scheme} realm="{exc.realm}"'},
         )
 
@@ -451,6 +460,15 @@ def _register_exception_handlers(app: FastAPI) -> None:
             else "Task does not accept messages."
         )
         return JSONResponse(status_code=422, content={"code": -32602, "message": msg})
+
+    @app.exception_handler(TaskNotCancelableError)
+    async def handle_task_not_cancelable(
+        _req: Request, _exc: TaskNotCancelableError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"code": -32002, "message": "Task is not cancelable"},
+        )
 
     @app.exception_handler(UnsupportedOperationError)
     async def handle_unsupported(_req: Request, exc: UnsupportedOperationError) -> JSONResponse:

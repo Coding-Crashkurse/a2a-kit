@@ -163,7 +163,7 @@ class SQLStorageBase(Storage[ContextT]):
             context_id=row.context_id,
             kind="task",
             status=status,
-            history=history if history else None,
+            history=history,
             artifacts=artifacts_list if artifacts_list else None,
             metadata=metadata_raw,
         )

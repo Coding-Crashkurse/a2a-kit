@@ -176,7 +176,7 @@ async def test_delete_config_removes(push_client):
     )
 
     resp = await push_client.delete(f"/v1/tasks/{task_id}/pushNotificationConfigs/cfg-1")
-    assert resp.status_code == 204
+    assert resp.status_code == 200
 
     # Verify it's gone
     resp = await push_client.get(f"/v1/tasks/{task_id}/pushNotificationConfigs")

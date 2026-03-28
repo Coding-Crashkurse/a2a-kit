@@ -267,13 +267,28 @@ class WorkerAdapter:
                 await ctx.send_status()
 
                 try:
-                    await self._user_worker.handle(ctx)
-                    if not ctx.turn_ended:
-                        # fail() drains pending artifacts internally
-                        await ctx.fail(
-                            "Worker returned without calling a lifecycle method "
-                            "(complete/fail/reject/respond/request_input/request_auth)"
+                    async with anyio.create_task_group() as tg:
+
+                        async def _cancel_watcher() -> None:
+                            await cancel_event.wait()
+                            tg.cancel_scope.cancel()
+
+                        tg.start_soon(_cancel_watcher)
+                        await self._user_worker.handle(ctx)
+                        if not ctx.turn_ended:
+                            await ctx.fail(
+                                "Worker returned without calling a lifecycle method "
+                                "(complete/fail/reject/respond/request_input/request_auth)"
+                            )
+                        tg.cancel_scope.cancel()
+
+                    if cancel_event.is_set() and not ctx.turn_ended:
+                        await ctx._flush_artifacts()
+                        await self._mark_canceled(
+                            self._storage, self._emitter, task_id, context_id
                         )
+                        if span:
+                            span.add_event(EVENT_CANCEL_REQUESTED)
                 except anyio.get_cancelled_exc_class():
                     if span:
                         span.add_event(EVENT_CANCEL_REQUESTED)

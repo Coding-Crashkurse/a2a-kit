@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/a2akit)](https://pypi.org/project/a2akit/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/pypi/pyversions/a2akit)](https://pypi.org/project/a2akit/)
-[![CI](https://github.com/Coding-Crashkurse/a2a-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/Coding-Crashkurse/a2a-kit/actions)
+[![CI](https://github.com/Coding-Crashkurse/a2akit/actions/workflows/ci.yml/badge.svg)](https://github.com/Coding-Crashkurse/a2akit/actions)
 
 **A2A agent framework in one import.**
 
@@ -95,13 +95,13 @@ Open `http://localhost:8000/chat` — chat with your agent and inspect tasks in 
 - **Pluggable backends** — PostgreSQL, SQLite, Redis broker/event bus/cancel registry
 - **Type-safe** — full type hints, `py.typed` marker, PEP 561 compliant
 
-📖 **[Full Documentation](https://coding-crashkurse.github.io/a2a-kit/)**
+📖 **[Full Documentation](https://coding-crashkurse.github.io/a2akit/)**
 
 ## Links
 
-- [PyPI](https://pypi.org/project/a2a-kit/)
-- [GitHub](https://github.com/Coding-Crashkurse/a2a-kit)
-- [Changelog](https://github.com/Coding-Crashkurse/a2a-kit/blob/main/CHANGELOG.md)
+- [PyPI](https://pypi.org/project/a2akit/)
+- [GitHub](https://github.com/Coding-Crashkurse/a2akit)
+- [Changelog](https://github.com/Coding-Crashkurse/a2akit/blob/main/CHANGELOG.md)
 
 ## License
 

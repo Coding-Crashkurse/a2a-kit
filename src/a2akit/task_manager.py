@@ -252,6 +252,12 @@ class TaskManager:
                                 break
                 except TimeoutError:
                     logger.info("Blocking wait timed out for task %s", task.id)
+                    latest = await self.storage.load_task(task.id)
+                    if latest is None or latest.status.state not in TERMINAL_STATES:
+                        raise UnsupportedOperationError(
+                            f"Task {task.id} did not complete within "
+                            f"{self.default_blocking_timeout_s}s blocking timeout"
+                        ) from None
         else:
             # Non-blocking: just enqueue and return immediately
             self._track_background(

@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.20] — 2026-03-28
+
+### Added
+- **Deploying to Production guide** — Docker Compose + Redis + PostgreSQL +
+  Uvicorn workers + nginx reverse proxy configuration with production checklist.
+- **Troubleshooting / FAQ page** — common errors (`TaskNotAcceptingMessagesError`,
+  `ContentTypeNotSupportedError`, blocking timeout), stuck tasks, SSE drops,
+  Redis issues, storage behavior, and debug UI setup.
+- **TaskContext Quick Reference table** — scannable method/property overview at
+  the top of the API reference page.
+
+### Changed
+- **Consistent REST error format** (Spec §3.2.3) — all error responses now use
+  `{"code": <int>, "message": <string>}`. Removed `{"detail": {...}}` wrapper
+  from `HTTPException` responses and JSON-RPC envelope from auth errors.
+- **`TaskNotCancelableError` global handler** — cancel errors now go through the
+  global exception handler instead of local `try/except` in the endpoint.
+- **Blocking timeout raises error** (Spec §7.1.2) — `configuration.blocking`
+  requests that exceed the timeout now return `UnsupportedOperationError` instead
+  of silently returning a non-terminal task. Already-completed tasks are returned
+  normally.
+- **JSON-RPC `tasks/resubscribe` passes `lastEventId`** (Spec §3.4.1) — parity
+  with the REST subscribe endpoint for event replay after reconnect.
+- **Delete push config returns `200` with `null`** (Spec §7.8) — previously
+  returned `204 No Content`.
+- **HTTP webhook warning** — `push_allow_http=True` now logs a warning on every
+  insecure webhook URL (A2A §4.1).
+
+### Fixed
+- **SQL storage `_trim_history`** — empty history list `[]` is no longer
+  converted to `None`, matching `InMemoryStorage` behavior.
+- **`ConcurrencyError` in InMemoryStorage** — now includes `current_version`
+  in the exception, matching SQL backends.
+- **Repository rename** — updated all `a2a-kit` references to `a2akit` in
+  `mkdocs.yml` and `README.md`.
+- **Echo example** — added `request_input()` demo flow (`"name"` command).
+
 ## [0.0.19] — 2026-03-28
 
 ### Changed

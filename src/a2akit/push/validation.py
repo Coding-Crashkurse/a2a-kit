@@ -42,6 +42,11 @@ def validate_webhook_url(
 
     if not allow_http and parsed.scheme != "https":
         return False
+    if allow_http and parsed.scheme == "http":
+        logger.warning(
+            "Allowing insecure HTTP webhook URL %r — do NOT use in production (A2A §4.1)",
+            url,
+        )
     if parsed.scheme not in ("http", "https"):
         return False
 
