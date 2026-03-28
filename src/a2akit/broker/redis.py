@@ -198,9 +198,20 @@ class RedisCancelRegistry(CancelRegistry):
         return scope
 
     async def cleanup(self, task_id: str) -> None:
-        """DEL cancel key. Pub/Sub channel is ephemeral."""
+        """DEL cancel key and clean up matching scopes."""
         cancel_key = f"{self._key_prefix}cancel:{task_id}"
         await self._redis.delete(cancel_key)
+        remaining: list[RedisCancelScope] = []
+        for scope in self._scopes:
+            if scope._task_id == task_id:
+                if scope._listener_task and not scope._listener_task.done():
+                    scope._listener_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await scope._listener_task
+                await scope._cleanup_pubsub()
+            else:
+                remaining.append(scope)
+        self._scopes = remaining
 
     async def close(self) -> None:
         """Close the Redis connection if we own it."""

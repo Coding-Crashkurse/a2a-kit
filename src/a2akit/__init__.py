@@ -57,7 +57,7 @@ from a2akit.worker import FileInfo, TaskContext, Worker
 
 def __getattr__(name: str) -> object:
     """Lazy-load Redis implementations to avoid hard dependency on redis-py."""
-    _redis_names = {"RedisBroker", "RedisCancelRegistry", "RedisEventBus"}
+    _redis_names = {"RedisBroker", "RedisCancelRegistry", "RedisEventBus", "RedisStorage"}
     if name in _redis_names:
         if name in ("RedisBroker", "RedisCancelRegistry"):
             from a2akit.broker.redis import RedisBroker, RedisCancelRegistry
@@ -68,6 +68,10 @@ def __getattr__(name: str) -> object:
             from a2akit.event_bus.redis import RedisEventBus
 
             globals()["RedisEventBus"] = RedisEventBus
+        if name == "RedisStorage":
+            from a2akit.storage.redis import RedisStorage
+
+            globals()["RedisStorage"] = RedisStorage
         return globals()[name]
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)
@@ -114,6 +118,7 @@ __all__ = [
     "RedisBroker",
     "RedisCancelRegistry",
     "RedisEventBus",
+    "RedisStorage",
     "RequestEnvelope",
     "Settings",
     "SignatureConfig",

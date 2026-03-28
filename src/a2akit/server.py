@@ -119,6 +119,7 @@ class A2AServer:
         push_timeout: float | None = None,
         push_max_concurrent: int | None = None,
         push_allow_http: bool | None = None,
+        push_idle_timeout: float | None = None,
         push_allowed_hosts: set[str] | None = None,
         push_blocked_hosts: set[str] | None = None,
         extended_card_provider: Callable[[Request], Awaitable[AgentCardConfig]] | None = None,
@@ -164,6 +165,9 @@ class A2AServer:
         self._push_allow_http = (
             push_allow_http if push_allow_http is not None else s.push_allow_http
         )
+        self._push_idle_timeout = (
+            push_idle_timeout if push_idle_timeout is not None else s.push_idle_timeout
+        )
         self._push_allowed_hosts = push_allowed_hosts
         self._push_blocked_hosts = push_blocked_hosts
         self._extended_card_provider = extended_card_provider
@@ -199,10 +203,14 @@ class A2AServer:
                 from a2akit.storage.sqlite import SQLiteStorage
 
                 return SQLiteStorage(self._storage_spec)
+            if self._storage_spec.startswith(("redis://", "rediss://")):
+                from a2akit.storage.redis import RedisStorage
+
+                return RedisStorage(self._storage_spec, settings=self._settings)
         msg = (
             f"Unknown storage backend: {self._storage_spec!r}. "
             "Use 'memory', a connection string "
-            "('postgresql+asyncpg://...', 'sqlite+aiosqlite:///...'), "
+            "('postgresql+asyncpg://...', 'sqlite+aiosqlite:///...', 'redis://...'), "
             "or pass a Storage instance."
         )
         raise ValueError(msg)
@@ -293,6 +301,7 @@ class A2AServer:
                     allow_http=server._push_allow_http,
                     allowed_hosts=server._push_allowed_hosts,
                     blocked_hosts=server._push_blocked_hosts,
+                    idle_timeout=server._push_idle_timeout,
                 )
                 await delivery_service.startup()
                 emitter = PushDeliveryEmitter(emitter, push_store, delivery_service, storage)

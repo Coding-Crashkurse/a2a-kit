@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     push_timeout: float = 10.0
     push_max_concurrent: int = 50
     push_allow_http: bool = False
+    push_idle_timeout: float = 300.0
 
 
 @lru_cache

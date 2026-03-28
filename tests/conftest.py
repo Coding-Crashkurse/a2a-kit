@@ -253,6 +253,36 @@ async def sql_storage(request):
                 await session.execute(contexts_table.delete())
 
 
+@pytest.fixture(params=["sqlite", "redis"])
+async def redis_storage(request):
+    """Parametrized fixture — runs against SQLite (baseline) and Redis storage."""
+    if request.param == "sqlite":
+        try:
+            from a2akit.storage.sqlite import SQLiteStorage
+        except ImportError:
+            pytest.skip("aiosqlite not installed")
+
+        s = SQLiteStorage("sqlite+aiosqlite://")
+        async with s:
+            yield s
+    else:
+        import os
+
+        url = os.environ.get("A2AKIT_TEST_REDIS_URL")
+        if not url:
+            pytest.skip("Redis not configured (set A2AKIT_TEST_REDIS_URL)")
+
+        try:
+            from a2akit.storage.redis import RedisStorage
+        except ImportError:
+            pytest.skip("redis-py not installed (pip install a2akit[redis])")
+
+        s = RedisStorage(url, key_prefix=f"a2akit:test:{uuid.uuid4().hex[:8]}:")
+        async with s:
+            yield s
+            await s._redis.flushdb()
+
+
 @pytest.fixture(params=["memory", "redis"])
 async def broker(request):
     """Parametrized broker — runs against both InMemory and Redis backends."""

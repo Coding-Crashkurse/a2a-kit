@@ -41,6 +41,7 @@ class WebhookDeliveryService:
         allow_http: bool = False,
         allowed_hosts: set[str] | None = None,
         blocked_hosts: set[str] | None = None,
+        idle_timeout: float = 300.0,
     ) -> None:
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
@@ -49,6 +50,7 @@ class WebhookDeliveryService:
         self._allow_http = allow_http
         self._allowed_hosts = allowed_hosts
         self._blocked_hosts = blocked_hosts
+        self._idle_timeout = idle_timeout
         self._http_client: httpx.AsyncClient | None = None
         # Per-config delivery queues ensure sequential ordering
         # Key: (task_id, config_id)
@@ -109,7 +111,11 @@ class WebhookDeliveryService:
     ) -> None:
         """Process deliveries for one config sequentially."""
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=self._idle_timeout)
+            except TimeoutError:
+                logger.debug("Idle timeout reached for delivery queue %s", key)
+                break
             if item is None:
                 break
             try:

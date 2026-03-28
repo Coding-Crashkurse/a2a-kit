@@ -111,3 +111,26 @@ async def test_startup_shutdown_lifecycle():
     await service.startup()
     assert service._http_client is not None
     await service.shutdown()
+
+
+async def test_idle_timeout_cleans_up_queue():
+    """Queue workers exit after idle_timeout when no new events arrive."""
+    service = WebhookDeliveryService(max_retries=1, allow_http=True, timeout=5.0, idle_timeout=0.2)
+    await service.startup()
+
+    mock_response = httpx.Response(200)
+    with patch.object(service._http_client, "post", return_value=mock_response):
+        config = _make_config(url="http://example.com/webhook")
+        task = _make_task()  # state=working, non-terminal
+        await service.deliver([config], task)
+        await asyncio.sleep(0.05)
+        # Worker is alive, queue exists
+        assert len(service._queue_workers) == 1
+
+        # Wait for idle timeout to fire
+        await asyncio.sleep(0.3)
+        # Worker should have exited and cleaned up
+        assert len(service._queue_workers) == 0
+        assert len(service._delivery_queues) == 0
+
+    await service.shutdown()
