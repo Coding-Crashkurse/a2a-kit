@@ -58,17 +58,16 @@ export function App() {
       </div>
       <div className="main">
         <AgentInfo card={card} error={cardError} />
-        <div className="panel-right">
-          {view === "chat" ? (
-            <ChatView card={card} />
-          ) : (
-            <TasksView
-              card={card}
-              active={view === "tasks"}
-              pollInterval={pollInterval}
-              onPollIntervalChange={setPollInterval}
-            />
-          )}
+        <div className="panel-right" style={{ display: view === "chat" ? "flex" : "none" }}>
+          <ChatView card={card} />
+        </div>
+        <div className="panel-right" style={{ display: view === "tasks" ? "flex" : "none" }}>
+          <TasksView
+            card={card}
+            active={view === "tasks"}
+            pollInterval={pollInterval}
+            onPollIntervalChange={setPollInterval}
+          />
         </div>
       </div>
       <div className="footer">

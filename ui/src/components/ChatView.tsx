@@ -96,9 +96,12 @@ export function ChatView({ card }: Props) {
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
-        // Cancelled by user — don't show error
+        // Cancelled by user — refs already cleared by handleCancel
       } else {
         addMsg("error", "Error: " + (err instanceof Error ? err.message : String(err)));
+        // Clear task refs so the next message starts fresh
+        taskIdRef.current = null;
+        contextIdRef.current = null;
       }
     }
 
@@ -135,22 +138,22 @@ export function ChatView({ card }: Props) {
       if (initial.contextId) contextIdRef.current = initial.contextId;
       updateIds(initial);
 
-      const TERMINAL = new Set(["completed", "failed", "canceled", "rejected"]);
+      const DONE = new Set(["completed", "failed", "canceled", "rejected", "input-required", "auth-required"]);
       const state = initial.status?.state || "";
 
-      if (!initial.id || TERMINAL.has(state) || initial.kind === "message") {
+      if (!initial.id || DONE.has(state) || initial.kind === "message") {
         setMessages((prev) => prev.filter((m) => !(m.type === "status" && m.text === "Thinking...")));
         handleTaskOrMessage(initial);
         return;
       }
 
-      // Poll until terminal state
+      // Poll until terminal or input-required state
       while (!signal?.aborted) {
         await new Promise((r) => setTimeout(r, 500));
         if (signal?.aborted) break;
         const task = await fetchTaskById(card!, initial.id);
         const s = task.status?.state || "";
-        if (TERMINAL.has(s)) {
+        if (DONE.has(s)) {
           setMessages((prev) => prev.filter((m) => !(m.type === "status" && m.text === "Thinking...")));
           handleTaskOrMessage(task);
           return;
