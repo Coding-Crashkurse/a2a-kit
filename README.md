@@ -87,31 +87,6 @@ Open `http://localhost:8000/chat` — chat with your agent, inspect tasks, and v
 
 ![Debug UI](docs/images/img1.png)
 
-## Feature Comparison
-
-| Feature | a2akit | python-a2a |
-|---|:---:|:---:|
-| A2A v0.3.0 spec compliance | Full | Partial |
-| SSE streaming with artifacts | Yes | Basic |
-| Multi-turn (`input-required`) | Yes | No |
-| Cooperative + force cancellation | Yes | No |
-| Push notifications (webhooks) | Yes | No |
-| SSE replay (`Last-Event-ID`) | Yes | No |
-| Multi-transport (JSON-RPC + REST) | Yes | No |
-| PostgreSQL storage | Yes | No |
-| SQLite storage | Yes | No |
-| Redis broker / event bus / cancel | Yes | No |
-| Optimistic concurrency control | Yes | No |
-| OpenTelemetry tracing & metrics | Yes | No |
-| Middleware pipeline (auth, CORS) | Yes | Basic |
-| Dependency injection | Yes | No |
-| Lifecycle hooks | Yes | No |
-| Built-in debug UI | Yes | Separate |
-| A2AClient with auto-discovery | Yes | Yes |
-| Type-safe (`py.typed`, PEP 561) | Yes | No |
-| Built-in LLM providers | No (use any SDK) | OpenAI, Anthropic, etc. |
-| CLI tool | No | Yes |
-
 ## Architecture
 
 ```
