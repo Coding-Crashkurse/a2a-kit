@@ -263,8 +263,10 @@ async def test_state_change_hook_sees_all_transitions():
         assert resp.status_code == 200
         assert resp.json()["status"]["state"] == "completed"
 
-        # Should have seen: working, working (status update), completed
-        assert hook.await_count >= 3
+        # Should have seen: working, completed
+        # (send_status does not trigger a state change — it updates the
+        # status message without transitioning state)
+        assert hook.await_count >= 2
         states = [call[0][1] for call in hook.call_args_list]
         assert states[0] == TaskState.working
         assert states[-1] == TaskState.completed
@@ -287,11 +289,11 @@ async def test_all_hooks_fire_full_lifecycle():
         assert resp.status_code == 200
         assert resp.json()["status"]["state"] == "completed"
 
-        # on_state_change fires for every transition
-        assert sc_hook.await_count >= 3
+        # on_state_change fires for actual state transitions (working + completed)
+        assert sc_hook.await_count >= 2
 
-        # on_working fires for every working write (initial + status updates)
-        assert w_hook.await_count >= 2
+        # on_working fires for the initial working transition
+        assert w_hook.await_count >= 1
 
         # on_terminal fires once for completed
         t_hook.assert_awaited_once()

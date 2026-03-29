@@ -30,8 +30,14 @@ async def parse_sse_stream(
         StreamEvent wrappers around parsed protocol events.
     """
     try:
+        current_event_id: str | None = None
         async for line in response.aiter_lines():
             line = line.strip()
+
+            if line.startswith("id:"):
+                current_event_id = line[len("id:") :].strip() or None
+                continue
+
             if not line.startswith("data:"):
                 continue
 
@@ -50,22 +56,27 @@ async def parse_sse_stream(
                     raise ProtocolError(f"JSON-RPC error {err.get('code')}: {err.get('message')}")
                 raw = raw.get("result", raw)
 
-            event = _deserialize_event(raw)
+            event = _deserialize_event(raw, event_id=current_event_id)
+            current_event_id = None
             yield event
     except httpx.ReadError as exc:
         raise ProtocolError(f"SSE stream read error: {exc}") from exc
 
 
-def _deserialize_event(data: dict[str, Any]) -> StreamEvent:
+def _deserialize_event(data: dict[str, Any], *, event_id: str | None = None) -> StreamEvent:
     """Deserialize a JSON dict into a StreamEvent."""
     kind = data.get("kind")
     try:
         if kind == "task":
-            return StreamEvent.from_raw(Task.model_validate(data))
+            return StreamEvent.from_raw(Task.model_validate(data), event_id=event_id)
         if kind == "status-update":
-            return StreamEvent.from_raw(TaskStatusUpdateEvent.model_validate(data))
+            return StreamEvent.from_raw(
+                TaskStatusUpdateEvent.model_validate(data), event_id=event_id
+            )
         if kind == "artifact-update":
-            return StreamEvent.from_raw(TaskArtifactUpdateEvent.model_validate(data))
+            return StreamEvent.from_raw(
+                TaskArtifactUpdateEvent.model_validate(data), event_id=event_id
+            )
     except Exception as exc:
         raise ProtocolError(f"Failed to deserialize SSE event: {exc}") from exc
 

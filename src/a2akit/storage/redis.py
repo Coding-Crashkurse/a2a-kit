@@ -148,8 +148,14 @@ class RedisStorage(Storage[ContextT]):
         self._url = url or s.redis_url
         self._pool = pool
         self._redis: aioredis.Redis | None = None
-        self._update_sha: str = ""
-        self._create_idem_sha: str = ""
+        self._update_script: Any = None
+        self._create_idem_script: Any = None
+
+    @property
+    def _r(self) -> aioredis.Redis:
+        if self._redis is None:
+            raise RuntimeError("RedisStorage not connected — use 'async with storage' first")
+        return self._redis
 
     async def __aenter__(self) -> Self:
         if self._pool is not None:
@@ -157,9 +163,9 @@ class RedisStorage(Storage[ContextT]):
         else:
             self._redis = aioredis.from_url(self._url)
         await self._redis.ping()
-        # Pre-load Lua scripts
-        self._update_sha = await self._redis.script_load(_UPDATE_TASK_LUA)
-        self._create_idem_sha = await self._redis.script_load(_CREATE_IDEMPOTENT_LUA)
+        # register_script() handles NOSCRIPT retry automatically after Redis restarts
+        self._update_script = self._redis.register_script(_UPDATE_TASK_LUA)
+        self._create_idem_script = self._redis.register_script(_CREATE_IDEMPOTENT_LUA)
         logger.info("Redis storage connected (prefix=%s)", self._key_prefix)
         return self
 
@@ -167,6 +173,15 @@ class RedisStorage(Storage[ContextT]):
         if self._redis and self._owns_connection:
             await self._redis.aclose()
         return False
+
+    async def health_check(self) -> dict[str, Any]:
+        """Ping Redis to verify connectivity."""
+        try:
+            if self._redis:
+                await self._redis.ping()
+            return {"status": "ok"}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
 
     def _task_key(self, task_id: str) -> str:
         return f"{self._key_prefix}task:{task_id}"
@@ -255,8 +270,7 @@ class RedisStorage(Storage[ContextT]):
         *,
         include_artifacts: bool = True,
     ) -> Task | None:
-        assert self._redis is not None
-        data = await self._redis.hgetall(self._task_key(task_id))
+        data = await self._r.hgetall(self._task_key(task_id))
         if not data:
             return None
         # Decode bytes to str
@@ -272,8 +286,6 @@ class RedisStorage(Storage[ContextT]):
         *,
         idempotency_key: str | None = None,
     ) -> Task:
-        assert self._redis is not None
-
         task_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         history_msg = message.model_copy(update={"task_id": task_id, "context_id": context_id})
@@ -299,29 +311,35 @@ class RedisStorage(Storage[ContextT]):
         }
 
         if idempotency_key:
-            # Atomic idempotent create via Lua
-            result_id = await self._redis.evalsha(
-                self._create_idem_sha,
-                3,
-                self._idem_key(context_id, idempotency_key),
-                self._task_key(task_id),
-                self._ctx_set_key(context_id),
-                task_id,
-                json.dumps(fields),
+            # Atomic idempotent create via Lua (register_script handles NOSCRIPT)
+            if self._create_idem_script is None:
+                raise RuntimeError("RedisStorage not connected — Lua scripts not registered")
+            result_id = await self._create_idem_script(
+                keys=[
+                    self._idem_key(context_id, idempotency_key),
+                    self._task_key(task_id),
+                    self._ctx_set_key(context_id),
+                ],
+                args=[task_id, json.dumps(fields)],
+                client=self._r,
             )
             returned_id = result_id.decode() if isinstance(result_id, bytes) else result_id
             if returned_id != task_id:
                 # Existing task found via idempotency key
                 existing = await self.load_task(returned_id)
-                assert existing is not None
+                if existing is None:
+                    raise TaskNotFoundError(
+                        f"Idempotent task {returned_id} vanished between create and load"
+                    )
                 return existing
         else:
             # Non-idempotent: just create
-            await self._redis.hset(self._task_key(task_id), mapping=fields)
-            await self._redis.sadd(self._ctx_set_key(context_id), task_id)
+            await self._r.hset(self._task_key(task_id), mapping=fields)
+            await self._r.sadd(self._ctx_set_key(context_id), task_id)
 
         loaded = await self.load_task(task_id)
-        assert loaded is not None
+        if loaded is None:
+            raise TaskNotFoundError(f"Task {task_id} vanished immediately after create")
         return loaded
 
     async def update_task(
@@ -335,10 +353,8 @@ class RedisStorage(Storage[ContextT]):
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:
-        assert self._redis is not None
-
         # Build values to update — we need current data for merging
-        current_data = await self._redis.hgetall(self._task_key(task_id))
+        current_data = await self._r.hgetall(self._task_key(task_id))
         if not current_data:
             raise TaskNotFoundError(f"Task {task_id} not found")
 
@@ -379,15 +395,21 @@ class RedisStorage(Storage[ContextT]):
                 _build_transition_record(state.value, ts, status_message),
             )
             values["metadata_json"] = json.dumps(existing_meta)
+        elif status_message is not None:
+            # Update status message without a state transition (e.g. progress text)
+            values["status_message"] = self._serialize_message(status_message) or ""
 
         try:
-            new_version: int = await self._redis.evalsha(
-                self._update_sha,
-                1,
-                self._task_key(task_id),
-                str(expected_version) if expected_version is not None else "",
-                state.value if state is not None else "",
-                json.dumps(values),
+            if self._update_script is None:
+                raise RuntimeError("RedisStorage not connected — Lua scripts not registered")
+            new_version: int = await self._update_script(
+                keys=[self._task_key(task_id)],
+                args=[
+                    str(expected_version) if expected_version is not None else "",
+                    state.value if state is not None else "",
+                    json.dumps(values),
+                ],
+                client=self._r,
             )
         except aioredis.ResponseError as e:
             err = str(e)
@@ -427,17 +449,15 @@ class RedisStorage(Storage[ContextT]):
         return existing
 
     async def list_tasks(self, query: ListTasksQuery) -> ListTasksResult:
-        assert self._redis is not None
-
         # Determine candidate task IDs
         if query.context_id:
-            task_ids_bytes = await self._redis.smembers(self._ctx_set_key(query.context_id))
+            task_ids_bytes = await self._r.smembers(self._ctx_set_key(query.context_id))
             task_ids = [tid.decode() for tid in task_ids_bytes]
         else:
             # Scan for all task keys
             task_ids = []
             pattern = f"{self._key_prefix}task:*"
-            async for key in self._redis.scan_iter(match=pattern, count=200):
+            async for key in self._r.scan_iter(match=pattern, count=200):
                 key_str = key.decode() if isinstance(key, bytes) else key
                 task_id = key_str[len(f"{self._key_prefix}task:") :]
                 task_ids.append(task_id)
@@ -445,7 +465,7 @@ class RedisStorage(Storage[ContextT]):
         # Load and filter tasks
         filtered: list[Task] = []
         for tid in task_ids:
-            data = await self._redis.hgetall(self._task_key(tid))
+            data = await self._r.hgetall(self._task_key(tid))
             if not data:
                 continue
             decoded = {k.decode(): v.decode() for k, v in data.items()}
@@ -482,29 +502,27 @@ class RedisStorage(Storage[ContextT]):
         )
 
     async def delete_task(self, task_id: str) -> bool:
-        assert self._redis is not None
         task_key = self._task_key(task_id)
 
         # Get context_id before deleting
-        context_id = await self._redis.hget(task_key, "context_id")
+        context_id = await self._r.hget(task_key, "context_id")
         if context_id is None:
             return False
 
         ctx_id = context_id.decode() if isinstance(context_id, bytes) else context_id
 
         # Remove from context set and delete hash
-        await self._redis.srem(self._ctx_set_key(ctx_id), task_id)
-        await self._redis.delete(task_key)
+        await self._r.srem(self._ctx_set_key(ctx_id), task_id)
+        await self._r.delete(task_key)
         return True
 
     async def delete_context(self, context_id: str) -> int:
-        assert self._redis is not None
         ctx_set_key = self._ctx_set_key(context_id)
 
-        task_ids_bytes = await self._redis.smembers(ctx_set_key)
+        task_ids_bytes = await self._r.smembers(ctx_set_key)
         if not task_ids_bytes:
             # Also delete context data
-            await self._redis.delete(self._context_data_key(context_id))
+            await self._r.delete(self._context_data_key(context_id))
             return 0
 
         task_ids = [tid.decode() for tid in task_ids_bytes]
@@ -513,26 +531,23 @@ class RedisStorage(Storage[ContextT]):
         keys_to_delete = [self._task_key(tid) for tid in task_ids]
         keys_to_delete.append(ctx_set_key)
         keys_to_delete.append(self._context_data_key(context_id))
-        await self._redis.delete(*keys_to_delete)
+        await self._r.delete(*keys_to_delete)
 
         return len(task_ids)
 
     async def get_version(self, task_id: str) -> int | None:
-        assert self._redis is not None
-        version = await self._redis.hget(self._task_key(task_id), "version")
+        version = await self._r.hget(self._task_key(task_id), "version")
         if version is None:
             return None
         raw = version.decode() if isinstance(version, bytes) else version
         return int(raw)
 
     async def load_context(self, context_id: str) -> ContextT | None:
-        assert self._redis is not None
-        data = await self._redis.get(self._context_data_key(context_id))
+        data = await self._r.get(self._context_data_key(context_id))
         if data is None:
             return None
         raw = data.decode() if isinstance(data, bytes) else data
         return json.loads(raw)  # type: ignore[no-any-return]
 
     async def update_context(self, context_id: str, context: ContextT) -> None:
-        assert self._redis is not None
-        await self._redis.set(self._context_data_key(context_id), json.dumps(context))
+        await self._r.set(self._context_data_key(context_id), json.dumps(context))

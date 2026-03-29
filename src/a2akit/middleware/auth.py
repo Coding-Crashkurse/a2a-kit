@@ -51,7 +51,7 @@ class BearerTokenMiddleware(A2AMiddleware):
     ) -> None:
         self._verify = verify
         self._realm = realm
-        self._exclude_paths = exclude_paths or {"/v1/health"}
+        self._exclude_paths = exclude_paths or {"/v1/health", "/v1/health/ready"}
 
     async def before_dispatch(
         self,
@@ -98,7 +98,7 @@ class ApiKeyMiddleware(A2AMiddleware):
     ) -> None:
         self._valid_keys = valid_keys
         self._header = header
-        self._exclude_paths = exclude_paths or {"/v1/health"}
+        self._exclude_paths = exclude_paths or {"/v1/health", "/v1/health/ready"}
 
     async def before_dispatch(
         self,

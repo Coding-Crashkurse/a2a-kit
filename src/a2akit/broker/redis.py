@@ -122,13 +122,22 @@ class RedisCancelScope(CancelScope):
     async def _listen(self) -> None:
         """Background task listening for cancel messages."""
         try:
-            assert self._pubsub is not None
+            if self._pubsub is None:
+                return
             async for message in self._pubsub.listen():
                 if message["type"] == "message":
                     self._event.set()
                     break
         except (asyncio.CancelledError, aioredis.ConnectionError):
             pass
+        except Exception:
+            # Unexpected error (e.g. AuthenticationError) — set the event
+            # so that wait() unblocks instead of hanging forever.  The
+            # force-cancel timeout in TaskManager is the ultimate safety
+            # net, but there's no reason to block a semaphore slot until
+            # then.
+            logger.exception("Cancel listener for %s failed unexpectedly", self._task_id)
+            self._event.set()
         finally:
             await self._cleanup_pubsub()
 
@@ -144,7 +153,9 @@ class RedisCancelScope(CancelScope):
 
     async def wait(self) -> None:
         """Block until cancellation is requested."""
-        if not self._started:
+        if self._startup_task is not None:
+            await self._startup_task  # propagate startup errors instead of hanging
+        elif not self._started:
             await self._start()
         await self._event.wait()
 
@@ -194,7 +205,7 @@ class RedisCancelRegistry(CancelRegistry):
         scope = RedisCancelScope(self._redis, task_id, self._key_prefix)
         self._scopes.append(scope)
         # Eagerly start the scope in the background
-        scope._startup_task = asyncio.ensure_future(scope._start())
+        scope._startup_task = asyncio.create_task(scope._start())
         return scope
 
     async def cleanup(self, task_id: str) -> None:
@@ -204,6 +215,10 @@ class RedisCancelRegistry(CancelRegistry):
         remaining: list[RedisCancelScope] = []
         for scope in self._scopes:
             if scope._task_id == task_id:
+                if scope._startup_task and not scope._startup_task.done():
+                    scope._startup_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await scope._startup_task
                 if scope._listener_task and not scope._listener_task.done():
                     scope._listener_task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -217,6 +232,10 @@ class RedisCancelRegistry(CancelRegistry):
         """Close the Redis connection if we own it."""
         # Clean up any active scopes
         for scope in self._scopes:
+            if scope._startup_task and not scope._startup_task.done():
+                scope._startup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scope._startup_task
             if scope._listener_task and not scope._listener_task.done():
                 scope._listener_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -345,6 +364,12 @@ class RedisBroker(Broker):
         self._redis: aioredis.Redis | None = None
         self._claim_task: asyncio.Task[None] | None = None
 
+    @property
+    def _r(self) -> aioredis.Redis:
+        if self._redis is None:
+            raise RuntimeError("RedisBroker not connected — use 'async with broker' first")
+        return self._redis
+
     async def __aenter__(self) -> Self:
         """Create Redis client, ensure consumer group exists, start claim task."""
         if self._pool is not None:
@@ -397,6 +422,15 @@ class RedisBroker(Broker):
             if self._owns_connection:
                 await self._redis.aclose()
 
+    async def health_check(self) -> dict[str, Any]:
+        """Ping Redis to verify connectivity."""
+        try:
+            if self._redis:
+                await self._redis.ping()
+            return {"status": "ok"}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def run_task(
         self,
         params: MessageSendParams,
@@ -405,13 +439,12 @@ class RedisBroker(Broker):
         request_context: dict[str, Any] | None = None,
     ) -> None:
         """XADD a task operation to the stream."""
-        assert self._redis is not None
         serialized = _serialize_operation(
             params,
             is_new_task=is_new_task,
             request_context=request_context or {},
         )
-        await self._redis.xadd(
+        await self._r.xadd(
             self._stream_key,
             {b"op": serialized.encode(), b"attempt": b"1"},
         )
@@ -422,7 +455,6 @@ class RedisBroker(Broker):
 
     async def receive_task_operations(self) -> AsyncIterator[OperationHandle]:
         """Yield task operations via XREADGROUP (blocking)."""
-        assert self._redis is not None
 
         while not self._shutdown_flag:
             # 1. Claim stale messages from dead consumers
@@ -431,7 +463,7 @@ class RedisBroker(Broker):
 
             # 2. Read new messages (blocking)
             try:
-                entries = await self._redis.xreadgroup(
+                entries = await self._r.xreadgroup(
                     groupname=self._group_name,
                     consumername=self._consumer_name,
                     streams={self._stream_key: ">"},
@@ -452,7 +484,7 @@ class RedisBroker(Broker):
                         op = _deserialize_operation(fields)
                         attempt = int(fields.get(b"attempt", b"1"))
                         yield RedisOperationHandle(
-                            redis_client=self._redis,
+                            redis_client=self._r,
                             stream_key=self._stream_key,
                             dlq_key=self._dlq_key,
                             group_name=self._group_name,
@@ -464,13 +496,12 @@ class RedisBroker(Broker):
                         )
                     except Exception:
                         logger.exception("Failed to deserialize operation %s", msg_id)
-                        await self._redis.xack(self._stream_key, self._group_name, msg_id)
+                        await self._r.xack(self._stream_key, self._group_name, msg_id)
 
     async def _claim_stale_messages(self) -> AsyncIterator[OperationHandle]:
         """Reclaim messages from dead consumers via XAUTOCLAIM."""
-        assert self._redis is not None
         try:
-            result = await self._redis.xautoclaim(
+            result = await self._r.xautoclaim(
                 self._stream_key,
                 self._group_name,
                 self._consumer_name,
@@ -481,14 +512,14 @@ class RedisBroker(Broker):
             for msg_id, fields in claimed_messages:
                 if not fields:
                     # Deleted entry, just ACK it
-                    await self._redis.xack(self._stream_key, self._group_name, msg_id)
+                    await self._r.xack(self._stream_key, self._group_name, msg_id)
                     continue
                 try:
                     op = _deserialize_operation(fields)
                     attempt = int(fields.get(b"attempt", b"1"))
                     logger.warning("Claimed stale message %s (attempt %d)", msg_id, attempt)
                     yield RedisOperationHandle(
-                        redis_client=self._redis,
+                        redis_client=self._r,
                         stream_key=self._stream_key,
                         dlq_key=self._dlq_key,
                         group_name=self._group_name,
@@ -500,7 +531,7 @@ class RedisBroker(Broker):
                     )
                 except Exception:
                     logger.exception("Failed to deserialize claimed message %s", msg_id)
-                    await self._redis.xack(self._stream_key, self._group_name, msg_id)
+                    await self._r.xack(self._stream_key, self._group_name, msg_id)
         except aioredis.ResponseError:
             # Stream or group doesn't exist yet — nothing to claim
             pass

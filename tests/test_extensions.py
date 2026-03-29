@@ -23,19 +23,6 @@ class _EchoWorker(Worker):
 
 
 def _make_extensions_app(extensions: list[ExtensionConfig] | None = None):
-    caps = CapabilitiesConfig(
-        extensions=[
-            AgentExtension(
-                uri=e.uri,
-                description=e.description,
-                required=e.required or None,
-                params=e.params or None,
-            )
-            for e in extensions
-        ]
-        if extensions
-        else None,
-    )
     server = A2AServer(
         worker=_EchoWorker(),
         agent_card=AgentCardConfig(
@@ -43,7 +30,6 @@ def _make_extensions_app(extensions: list[ExtensionConfig] | None = None):
             description="Agent for extension tests.",
             version="0.0.1",
             protocol="http+json",
-            capabilities=caps,
             extensions=extensions or [],
         ),
     )

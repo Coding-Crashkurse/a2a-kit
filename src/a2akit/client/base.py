@@ -276,23 +276,27 @@ class A2AClient:
     ) -> ClientResult:
         """Send a text message to the agent.
 
-        If ``push_url`` is provided, a push notification config is created
-        inline with the message submission.
+        If ``push_url`` is provided, a push notification config is sent
+        inline with the message so the server registers it before processing.
         """
+        from a2a.types import PushNotificationConfig
+
+        push_config: PushNotificationConfig | None = None
+        if push_url:
+            push_kwargs: dict[str, Any] = {"url": push_url}
+            if push_token:
+                push_kwargs["token"] = push_token
+            push_config = PushNotificationConfig(**push_kwargs)
+
         parts = [Part(root=TextPart(text=text))]
-        result = await self.send_parts(
+        return await self.send_parts(
             parts,
             task_id=task_id,
             context_id=context_id,
             blocking=blocking,
             metadata=metadata,
+            push_notification_config=push_config,
         )
-
-        # Inline push config convenience
-        if push_url and result.task_id:
-            await self.set_push_config(result.task_id, url=push_url, token=push_token)
-
-        return result
 
     @traced_client_method(SPAN_CLIENT_SEND)
     async def send_parts(
@@ -303,6 +307,7 @@ class A2AClient:
         context_id: str | None = None,
         blocking: bool = True,
         metadata: dict[str, Any] | None = None,
+        push_notification_config: Any = None,
     ) -> ClientResult:
         """Send raw Part objects to the agent."""
         transport = self._ensure_connected()
@@ -312,6 +317,7 @@ class A2AClient:
             context_id=context_id,
             blocking=blocking,
             metadata=metadata,
+            push_notification_config=push_notification_config,
         )
 
         async def _do_send() -> Task | Message:
@@ -503,6 +509,7 @@ class A2AClient:
         context_id: str | None,
         blocking: bool,
         metadata: dict[str, Any] | None,
+        push_notification_config: Any = None,
     ) -> MessageSendParams:
         """Build MessageSendParams from user inputs."""
         msg_kwargs: dict[str, Any] = {
@@ -522,7 +529,12 @@ class A2AClient:
         message = A2AMessage(**msg_kwargs)
 
         params_kwargs: dict[str, Any] = {"message": message}
+        config_kwargs: dict[str, Any] = {}
         if blocking:
-            params_kwargs["configuration"] = MessageSendConfiguration(blocking=True)
+            config_kwargs["blocking"] = True
+        if push_notification_config is not None:
+            config_kwargs["push_notification_config"] = push_notification_config
+        if config_kwargs:
+            params_kwargs["configuration"] = MessageSendConfiguration(**config_kwargs)
 
         return MessageSendParams(**params_kwargs)

@@ -51,7 +51,7 @@ class InMemoryEventBus(EventBus):
         self._replay_buffer_size = (
             replay_buffer_size if replay_buffer_size is not None else s.event_replay_buffer
         )
-        self._event_subscribers: dict[str, list[MemoryObjectSendStream[StreamEvent]]] = {}
+        self._subs: dict[str, list[MemoryObjectSendStream[tuple[str, StreamEvent]]]] = {}
         self._subscriber_lock: anyio.Lock = anyio.Lock()
         # Per-task ring buffer for replay and monotonic counter for event IDs.
         self._replay_buffers: dict[str, deque[_BufferedEvent]] = {}
@@ -89,52 +89,59 @@ class InMemoryEventBus(EventBus):
 
         # Fan out to live subscribers.
         async with self._subscriber_lock:
-            subscribers = self._event_subscribers.get(task_id, [])
+            subscribers = self._subs.get(task_id, [])
             if not subscribers:
                 return event_id
-            alive: list[MemoryObjectSendStream[StreamEvent]] = []
+            alive: list[MemoryObjectSendStream[tuple[str, StreamEvent]]] = []
             for s in subscribers:
                 try:
-                    await s.send(event)
+                    await s.send((event_id, event))
                     alive.append(s)
                 except (anyio.ClosedResourceError, anyio.BrokenResourceError):
                     pass
             if alive:
-                self._event_subscribers[task_id] = alive
+                self._subs[task_id] = alive
             else:
-                self._event_subscribers.pop(task_id, None)
+                self._subs.pop(task_id, None)
         return event_id
 
     @asynccontextmanager
     async def subscribe(
         self, task_id: str, *, after_event_id: str | None = None
-    ) -> AsyncIterator[AsyncIterator[StreamEvent]]:
+    ) -> AsyncIterator[AsyncIterator[tuple[str | None, StreamEvent]]]:
         """Subscribe to stream events. Replays buffered events when after_event_id is provided."""
-        send_stream, recv_stream = anyio.create_memory_object_stream[StreamEvent](
+        send_stream, recv_stream = anyio.create_memory_object_stream[tuple[str, StreamEvent]](
             max_buffer_size=self._event_buffer
         )
         async with self._subscriber_lock:
-            self._event_subscribers.setdefault(task_id, []).append(send_stream)
+            self._subs.setdefault(task_id, []).append(send_stream)
         try:
             yield self._iter_events(recv_stream, task_id, after_event_id)
         finally:
             async with self._subscriber_lock:
-                lst = self._event_subscribers.get(task_id)
+                lst = self._subs.get(task_id)
                 if lst:
                     with suppress(ValueError):
                         lst.remove(send_stream)
                     if not lst:
-                        self._event_subscribers.pop(task_id, None)
+                        self._subs.pop(task_id, None)
             await send_stream.aclose()
             await recv_stream.aclose()
 
     async def _iter_events(
         self,
-        recv_stream: MemoryObjectReceiveStream[StreamEvent],
+        recv_stream: MemoryObjectReceiveStream[tuple[str, StreamEvent]],
         task_id: str,
         after_event_id: str | None,
-    ) -> AsyncIterator[StreamEvent]:
-        """Replay buffered events (if requested), then yield live events."""
+    ) -> AsyncIterator[tuple[str | None, StreamEvent]]:
+        """Replay buffered events (if requested), then yield live events.
+
+        Tracks ``last_yielded_id`` to skip duplicates that can occur when
+        an event is published between subscriber registration and the
+        replay buffer snapshot.
+        """
+        last_yielded_id = 0
+
         # Replay phase: yield buffered events with ID > after_event_id.
         if after_event_id is not None:
             try:
@@ -145,22 +152,27 @@ class InMemoryEventBus(EventBus):
             if buf:
                 for buffered in list(buf):
                     if buffered.id > after_id:
-                        yield buffered.event
+                        yield (str(buffered.id), buffered.event)
+                        last_yielded_id = buffered.id
                         if (
                             isinstance(buffered.event, TaskStatusUpdateEvent)
                             and buffered.event.final
                         ):
                             return
 
-        # Live phase: yield events from the subscription stream.
-        async for ev in recv_stream:
-            yield ev
+        # Live phase: yield events from the subscription stream,
+        # skipping any already delivered during replay.
+        async for event_id, ev in recv_stream:
+            eid_int = int(event_id) if event_id else 0
+            if eid_int <= last_yielded_id:
+                continue
+            yield (event_id, ev)
             if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
                 break
 
     async def cleanup(self, task_id: str) -> None:
         """Remove subscriber state and replay buffer for a completed task."""
         async with self._subscriber_lock:
-            self._event_subscribers.pop(task_id, None)
+            self._subs.pop(task_id, None)
         self._replay_buffers.pop(task_id, None)
         self._event_counters.pop(task_id, None)

@@ -62,14 +62,17 @@ class A2AMiddleware:
     async def after_dispatch(
         self,
         envelope: RequestEnvelope,
-        result: Task | Message,
+        result: Task | Message | None = None,
     ) -> None:
         """Called after TaskManager returns, before the HTTP response is sent.
 
         Use for logging, metrics, cleanup. ``envelope.context`` is still
         available here (same object as in ``before_dispatch``).
 
+        For streaming requests, ``result`` is ``None`` because there is no
+        single response object — the events were already streamed to the client.
+
         Args:
             envelope: The same envelope from ``before_dispatch``.
-            result: The Task or Message returned by TaskManager.
+            result: The Task or Message returned by TaskManager, or None for streams.
         """

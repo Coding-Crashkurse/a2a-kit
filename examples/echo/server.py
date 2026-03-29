@@ -20,6 +20,7 @@ class EchoWorker(Worker):
     """
 
     async def handle(self, ctx: TaskContext) -> None:
+
         if ctx.user_text == "fail":
             await ctx.fail(f"Echo: {ctx.user_text}")
             return

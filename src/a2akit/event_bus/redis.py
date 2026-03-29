@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from a2a.types import (
     Message,
@@ -112,6 +112,12 @@ class RedisEventBus(EventBus):
         self._pool = pool
         self._redis: aioredis.Redis | None = None
 
+    @property
+    def _r(self) -> aioredis.Redis:
+        if self._redis is None:
+            raise RuntimeError("RedisEventBus not connected — use 'async with event_bus' first")
+        return self._redis
+
     async def __aenter__(self) -> Self:
         """Create Redis client and verify connectivity."""
         if self._pool is not None:
@@ -132,6 +138,15 @@ class RedisEventBus(EventBus):
         if self._redis and self._owns_connection:
             await self._redis.aclose()
 
+    async def health_check(self) -> dict[str, Any]:
+        """Ping Redis to verify connectivity."""
+        try:
+            if self._redis:
+                await self._redis.ping()
+            return {"status": "ok"}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def publish(self, task_id: str, event: StreamEvent) -> str | None:
         """Dual-write: XADD to replay stream + PUBLISH wakeup to Pub/Sub channel.
 
@@ -140,12 +155,11 @@ class RedisEventBus(EventBus):
         ("1"); live subscribers read the actual payload via XREAD from
         the stream, avoiding double serialization.
         """
-        assert self._redis is not None
         serialized = _serialize_event(event)
         stream_key = f"{self._stream_prefix}{task_id}"
         channel = f"{self._channel_prefix}{task_id}"
 
-        async with self._redis.pipeline(transaction=False) as pipe:
+        async with self._r.pipeline(transaction=False) as pipe:
             pipe.xadd(
                 stream_key,
                 {"data": serialized},
@@ -161,15 +175,14 @@ class RedisEventBus(EventBus):
     @asynccontextmanager
     async def subscribe(
         self, task_id: str, *, after_event_id: str | None = None
-    ) -> AsyncIterator[AsyncIterator[StreamEvent]]:
+    ) -> AsyncIterator[AsyncIterator[tuple[str | None, StreamEvent]]]:
         """Subscribe to events for a task.
 
         Replays missed events from the stream, then switches to
         live Pub/Sub delivery. The gap between replay and live is
         handled by a gap-fill check after subscribing.
         """
-        assert self._redis is not None
-        pubsub = self._redis.pubsub()
+        pubsub = self._r.pubsub()
         channel = f"{self._channel_prefix}{task_id}"
         await pubsub.subscribe(channel)
 
@@ -187,15 +200,14 @@ class RedisEventBus(EventBus):
         pubsub: aioredis.client.PubSub,
         task_id: str,
         after_event_id: str | None,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncIterator[tuple[str | None, StreamEvent]]:
         """Replay → gap-fill → live Pub/Sub."""
-        assert self._redis is not None
         stream_key = f"{self._stream_prefix}{task_id}"
         last_seen_id: str = after_event_id or "0-0"
 
         # Phase 1: Replay from stream
         if after_event_id is not None:
-            entries = await self._redis.xrange(stream_key, min=f"({after_event_id}", max="+")
+            entries = await self._r.xrange(stream_key, min=f"({after_event_id}", max="+")
             for entry_id, fields in entries:
                 eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
                 data = fields.get(b"data", b"").decode()
@@ -205,12 +217,12 @@ class RedisEventBus(EventBus):
                     logger.exception("Failed to deserialize replay event %s", eid)
                     continue
                 last_seen_id = eid
-                yield event
+                yield (eid, event)
                 if _is_final(event):
                     return
 
         # Phase 2: Gap-fill — events added between replay and subscribe
-        gap_entries = await self._redis.xrange(stream_key, min=f"({last_seen_id}", max="+")
+        gap_entries = await self._r.xrange(stream_key, min=f"({last_seen_id}", max="+")
         for entry_id, fields in gap_entries:
             eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
             data = fields.get(b"data", b"").decode()
@@ -220,7 +232,7 @@ class RedisEventBus(EventBus):
                 logger.exception("Failed to deserialize gap-fill event %s", eid)
                 continue
             last_seen_id = eid
-            yield event
+            yield (eid, event)
             if _is_final(event):
                 return
 
@@ -233,15 +245,13 @@ class RedisEventBus(EventBus):
                 continue
             # Wakeup received — read new entries from the stream
             try:
-                entries = await self._redis.xrange(stream_key, min=f"({last_seen_id}", max="+")
+                entries = await self._r.xrange(stream_key, min=f"({last_seen_id}", max="+")
                 for entry_id, fields in entries:
                     eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
-                    if eid <= last_seen_id:
-                        continue
                     last_seen_id = eid
                     data = fields.get(b"data", b"").decode()
                     event = _deserialize_event(data)
-                    yield event
+                    yield (eid, event)
                     if _is_final(event):
                         return
             except Exception:
@@ -250,6 +260,5 @@ class RedisEventBus(EventBus):
 
     async def cleanup(self, task_id: str) -> None:
         """Delete the replay stream for a completed task."""
-        assert self._redis is not None
         stream_key = f"{self._stream_prefix}{task_id}"
-        await self._redis.delete(stream_key)
+        await self._r.delete(stream_key)

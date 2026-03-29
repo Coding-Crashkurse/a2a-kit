@@ -88,7 +88,12 @@ class WebhookDeliveryService:
             config_id = config.push_notification_config.id or "default"
             queue_key = (task.id, config_id)
 
-            if queue_key not in self._delivery_queues:
+            existing_worker = self._queue_workers.get(queue_key)
+            if existing_worker is None or existing_worker.done():
+                # Worker exited (idle timeout / terminal state) or never existed.
+                # Clean up stale references and start fresh.
+                self._delivery_queues.pop(queue_key, None)
+                self._queue_workers.pop(queue_key, None)
                 queue: asyncio.Queue[Task | None] = asyncio.Queue()
                 self._delivery_queues[queue_key] = queue
                 worker = asyncio.create_task(self._queue_worker(queue_key, queue, config))
@@ -157,8 +162,8 @@ class WebhookDeliveryService:
         headers = _build_headers(pnc)
         payload = task.model_dump(mode="json", by_alias=True, exclude_none=True)
 
-        async with self._semaphore:
-            for attempt in range(1, self._max_retries + 1):
+        for attempt in range(1, self._max_retries + 1):
+            async with self._semaphore:
                 try:
                     resp = await self._http_client.post(
                         url,
@@ -186,15 +191,15 @@ class WebhookDeliveryService:
                         self._max_retries,
                     )
 
-                if attempt < self._max_retries:
-                    delay = self._retry_base_delay * (2 ** (attempt - 1))
-                    await asyncio.sleep(delay)
+            if attempt < self._max_retries:
+                delay = self._retry_base_delay * (2 ** (attempt - 1))
+                await asyncio.sleep(delay)
 
-            logger.error(
-                "Push to %s exhausted all %d retries",
-                url,
-                self._max_retries,
-            )
+        logger.error(
+            "Push to %s exhausted all %d retries",
+            url,
+            self._max_retries,
+        )
 
 
 def _build_headers(config: PushNotificationConfig) -> dict[str, str]:

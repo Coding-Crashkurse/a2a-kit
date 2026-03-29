@@ -163,6 +163,10 @@ class Storage(ABC, Generic[ContextT]):
         """Exit the async context manager."""
         return False
 
+    async def health_check(self) -> dict[str, Any]:
+        """Check backend connectivity. Override for real checks."""
+        return {"status": "ok"}
+
     @abstractmethod
     async def load_task(
         self,

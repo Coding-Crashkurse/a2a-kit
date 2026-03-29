@@ -21,8 +21,8 @@ async def test_publish_subscribe(event_bus):
 
     async def subscriber():
         async with event_bus.subscribe(task_id) as stream:
-            async for ev in stream:
-                received.append(ev)
+            async for eid, ev in stream:
+                received.append((eid, ev))
                 break  # consume one and exit
 
     async with anyio.create_task_group() as tg:
@@ -32,8 +32,10 @@ async def test_publish_subscribe(event_bus):
         await event_bus.publish(task_id, event)
 
     assert len(received) == 1
-    assert isinstance(received[0], TaskStatusUpdateEvent)
-    assert received[0].status.state == TaskState.working
+    eid, ev = received[0]
+    assert isinstance(ev, TaskStatusUpdateEvent)
+    assert ev.status.state == TaskState.working
+    assert eid is not None
 
 
 async def test_final_event_ends_iterator(event_bus):
@@ -58,7 +60,7 @@ async def test_final_event_ends_iterator(event_bus):
 
     async def subscriber():
         async with event_bus.subscribe(task_id) as stream:
-            async for ev in stream:
+            async for _eid, ev in stream:
                 received.append(ev)
 
     async with anyio.create_task_group() as tg:

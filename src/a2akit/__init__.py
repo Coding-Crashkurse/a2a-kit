@@ -54,27 +54,21 @@ from a2akit.task_manager import TaskManager
 from a2akit.telemetry import OTEL_ENABLED
 from a2akit.worker import FileInfo, TaskContext, Worker
 
+try:
+    from a2akit.broker.redis import RedisBroker, RedisCancelRegistry
+except ImportError:
+    RedisBroker = None  # type: ignore[assignment,misc]
+    RedisCancelRegistry = None  # type: ignore[assignment,misc]
 
-def __getattr__(name: str) -> object:
-    """Lazy-load Redis implementations to avoid hard dependency on redis-py."""
-    _redis_names = {"RedisBroker", "RedisCancelRegistry", "RedisEventBus", "RedisStorage"}
-    if name in _redis_names:
-        if name in ("RedisBroker", "RedisCancelRegistry"):
-            from a2akit.broker.redis import RedisBroker, RedisCancelRegistry
+try:
+    from a2akit.event_bus.redis import RedisEventBus
+except ImportError:
+    RedisEventBus = None  # type: ignore[assignment,misc]
 
-            globals()["RedisBroker"] = RedisBroker
-            globals()["RedisCancelRegistry"] = RedisCancelRegistry
-        if name == "RedisEventBus":
-            from a2akit.event_bus.redis import RedisEventBus
-
-            globals()["RedisEventBus"] = RedisEventBus
-        if name == "RedisStorage":
-            from a2akit.storage.redis import RedisStorage
-
-            globals()["RedisStorage"] = RedisStorage
-        return globals()[name]
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)
+try:
+    from a2akit.storage.redis import RedisStorage
+except ImportError:
+    RedisStorage = None  # type: ignore[assignment,misc]
 
 
 __all__ = [

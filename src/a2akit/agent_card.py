@@ -167,31 +167,41 @@ def build_agent_card(
         agent_url = f"{stripped}/v1"
         transport = TransportProtocol.http_json
 
-    # Build additional_interfaces from additional_protocols
-    interfaces = [AgentInterface(url=agent_url, transport=transport)]
+    # Build additional_interfaces from additional_protocols (excludes primary)
+    additional_interfaces: list[AgentInterface] = []
     for proto in additional_protocols or []:
         normalized = proto.lower().replace(" ", "")
         if normalized in ("jsonrpc",) and transport != TransportProtocol.jsonrpc:
-            interfaces.append(AgentInterface(url=stripped, transport=TransportProtocol.jsonrpc))
+            additional_interfaces.append(
+                AgentInterface(url=stripped, transport=TransportProtocol.jsonrpc)
+            )
         elif (
             normalized in ("http+json", "http", "rest")
             and transport != TransportProtocol.http_json
         ):
-            interfaces.append(
+            additional_interfaces.append(
                 AgentInterface(url=f"{stripped}/v1", transport=TransportProtocol.http_json)
             )
 
     caps = config.capabilities
+
+    # Merge extensions from both config.extensions (ExtensionConfig objects
+    # that get converted) and config.capabilities.extensions (raw
+    # AgentExtension objects passed through directly).
+    merged_extensions: list[AgentExtension] = [_to_agent_extension(e) for e in config.extensions]
+    if caps.extensions:
+        merged_extensions.extend(caps.extensions)
+
     return AgentCard(
         protocol_version=config.protocol_version,
         name=config.name,
         description=config.description,
         url=agent_url,
         preferred_transport=transport,
-        additional_interfaces=interfaces,
+        additional_interfaces=additional_interfaces or None,
         version=config.version,
         capabilities=AgentCapabilities(
-            extensions=[_to_agent_extension(e) for e in config.extensions] or None,
+            extensions=merged_extensions or None,
             streaming=caps.streaming,
             push_notifications=caps.push_notifications,
             state_transition_history=caps.state_transition_history,

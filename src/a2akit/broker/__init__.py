@@ -9,6 +9,12 @@ from a2akit.broker.base import (
 )
 from a2akit.broker.memory import InMemoryBroker, InMemoryCancelRegistry
 
+try:
+    from a2akit.broker.redis import RedisBroker, RedisCancelRegistry
+except ImportError:
+    RedisBroker = None  # type: ignore[assignment,misc]
+    RedisCancelRegistry = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "Broker",
     "CancelRegistry",
@@ -16,17 +22,7 @@ __all__ = [
     "InMemoryBroker",
     "InMemoryCancelRegistry",
     "OperationHandle",
+    "RedisBroker",
+    "RedisCancelRegistry",
     "TaskOperation",
 ]
-
-
-def __getattr__(name: str) -> object:
-    """Lazy-load Redis implementations to avoid hard dependency on redis-py."""
-    if name in ("RedisBroker", "RedisCancelRegistry"):
-        from a2akit.broker.redis import RedisBroker, RedisCancelRegistry
-
-        globals()["RedisBroker"] = RedisBroker
-        globals()["RedisCancelRegistry"] = RedisCancelRegistry
-        return globals()[name]
-    msg = f"module {__name__!r} has no attribute {name!r}"
-    raise AttributeError(msg)

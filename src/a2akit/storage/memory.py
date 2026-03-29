@@ -226,6 +226,13 @@ class InMemoryStorage(Storage[ContextT]):
             task.metadata.setdefault("stateTransitions", []).append(
                 _build_transition_record(state.value, ts, status_message),
             )
+        elif status_message is not None:
+            # Update status message without a state transition (e.g. progress text)
+            task.status = TaskStatus(
+                state=task.status.state,
+                timestamp=task.status.timestamp,
+                message=status_message,
+            )
 
         new_version = current_version + 1
         self._versions[task_id] = new_version

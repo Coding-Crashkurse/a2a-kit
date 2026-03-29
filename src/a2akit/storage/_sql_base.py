@@ -95,6 +95,18 @@ class SQLStorageBase(Storage[ContextT]):
             await self._engine.dispose()
         return False
 
+    async def health_check(self) -> dict[str, Any]:
+        """Execute ``SELECT 1`` to verify database connectivity."""
+        try:
+            if self._engine:
+                from sqlalchemy import text
+
+                async with self._engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+            return {"status": "ok"}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     def _get_session(self) -> AsyncSession:
         if self._session_factory is None:
             msg = "Storage not entered — call async with storage first"
@@ -298,13 +310,21 @@ class SQLStorageBase(Storage[ContextT]):
                     ),
                 )
                 values["metadata_json"] = json.dumps(existing_meta)
+            elif status_message is not None:
+                # Update status message without a state transition (e.g. progress text)
+                values["status_message"] = self._serialize_message(status_message)
 
-            await session.execute(
+            result = await session.execute(
                 tasks_table.update()
                 .where(tasks_table.c.id == task_id)
                 .where(tasks_table.c.version == row.version)
                 .values(**values)
             )
+            if result.rowcount == 0:  # type: ignore[attr-defined]
+                raise ConcurrencyError(
+                    f"Concurrent modification of task {task_id}",
+                    current_version=None,  # force fresh read via get_version()
+                )
 
             return int(new_version)
 

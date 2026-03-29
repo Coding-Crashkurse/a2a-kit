@@ -92,14 +92,24 @@ async def test_rest_works(multi_client):
 
 @pytest.mark.asyncio
 async def test_agent_card_has_additional_interfaces(multi_client):
-    """Agent card includes additionalInterfaces for both transports."""
+    """Agent card additionalInterfaces contains only non-primary transports.
+
+    The primary transport (jsonrpc) is exposed via url + preferredTransport.
+    Only the additional transport (HTTP+JSON) appears in additionalInterfaces.
+    """
     resp = await multi_client.get("/.well-known/agent-card.json")
     assert resp.status_code == 200
     card = resp.json()
+
+    # Primary transport is in the top-level fields
+    assert card["preferredTransport"] in ("JSONRPC", "jsonrpc")
+
+    # additionalInterfaces contains only the extra transport
     interfaces = card.get("additionalInterfaces", [])
     transports = {i["transport"] for i in interfaces}
-    assert "JSONRPC" in transports or "jsonrpc" in transports
     assert "HTTP+JSON" in transports or "http+json" in transports
+    assert "JSONRPC" not in transports
+    assert "jsonrpc" not in transports
 
 
 @pytest.mark.asyncio

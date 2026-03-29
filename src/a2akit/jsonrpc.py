@@ -113,6 +113,9 @@ def _get_tm(request: Request) -> TaskManager:
     return tm
 
 
+_JSONRPC_DISPATCH: dict[str, Any] = {}
+
+
 def build_jsonrpc_router() -> APIRouter:
     """Build the JSON-RPC 2.0 A2A router."""
     router = APIRouter(dependencies=[Depends(_check_a2a_version)])
@@ -150,22 +153,7 @@ def build_jsonrpc_router() -> APIRouter:
         method = body["method"]
         params = body.get("params", {})
 
-        dispatch = {
-            "message/send": _handle_message_send,
-            "message/sendStream": _handle_message_send_stream,
-            "tasks/get": _handle_tasks_get,
-            "tasks/list": _handle_tasks_list,
-            "tasks/cancel": _handle_tasks_cancel,
-            "tasks/resubscribe": _handle_tasks_resubscribe,
-            "tasks/pushNotificationConfig/set": _handle_push_set,
-            "tasks/pushNotificationConfig/get": _handle_push_get,
-            "tasks/pushNotificationConfig/list": _handle_push_list,
-            "tasks/pushNotificationConfig/delete": _handle_push_delete,
-            "agent/getAuthenticatedExtendedCard": _handle_get_extended_card,
-            "health": _handle_health,
-        }
-
-        handler = dispatch.get(method)
+        handler = _JSONRPC_DISPATCH.get(method)
         if handler is None:
             return _error_response(
                 req_id, METHOD_NOT_FOUND, f"Method not found: {method}", {"method": method}
@@ -242,20 +230,34 @@ async def _handle_message_send_stream(
             await mw.before_dispatch(envelope, request)
 
         agen = tm.stream_message(envelope.params, request_context=envelope.context)
+        # Eagerly fetch the first event so that _submit_task errors
+        # (TaskTerminalStateError, ContextMismatchError, etc.) produce
+        # a proper JSON-RPC error response instead of a broken SSE stream.
+        try:
+            first_pair = await anext(agen)
+        except BaseException:
+            await agen.aclose()
+            raise
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 
     async def _sse_generator() -> AsyncIterator[str]:
-        sse_id = 0
         try:
-            async for event in agen:
+            first_eid, first_event = first_pair
+            if not isinstance(first_event, DirectReply):
+                payload = {"jsonrpc": "2.0", "id": req_id, "result": _serialize(first_event)}
+                yield f"id: {first_eid or ''}\ndata: {json.dumps(payload)}\n\n"
+            async for event_id, event in agen:
                 if isinstance(event, DirectReply):
                     continue
-                sse_id += 1
                 payload = {"jsonrpc": "2.0", "id": req_id, "result": _serialize(event)}
-                yield f"id: {sse_id}\ndata: {json.dumps(payload)}\n\n"
+                yield f"id: {event_id or ''}\ndata: {json.dumps(payload)}\n\n"
         except Exception:
             logger.exception("JSON-RPC SSE stream aborted")
+        finally:
+            await agen.aclose()
+            for mw in reversed(middlewares):
+                await mw.after_dispatch(envelope)
 
     return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
@@ -339,20 +341,29 @@ async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[
 
     try:
         agen = tm.subscribe_task(task_id, after_event_id=after_event_id)
+        try:
+            first_pair = await anext(agen)
+        except BaseException:
+            await agen.aclose()
+            raise
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 
     async def _sse_generator() -> AsyncIterator[str]:
-        sse_id = 0
         try:
-            async for event in agen:
+            first_eid, first_event = first_pair
+            if not isinstance(first_event, DirectReply):
+                payload = {"jsonrpc": "2.0", "id": req_id, "result": _serialize(first_event)}
+                yield f"id: {first_eid or ''}\ndata: {json.dumps(payload)}\n\n"
+            async for event_id, event in agen:
                 if isinstance(event, DirectReply):
                     continue
-                sse_id += 1
                 payload = {"jsonrpc": "2.0", "id": req_id, "result": _serialize(event)}
-                yield f"id: {sse_id}\ndata: {json.dumps(payload)}\n\n"
+                yield f"id: {event_id or ''}\ndata: {json.dumps(payload)}\n\n"
         except Exception:
             logger.exception("JSON-RPC SSE resubscribe stream aborted")
+        finally:
+            await agen.aclose()
 
     return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
@@ -499,10 +510,29 @@ async def _handle_get_extended_card(
             request.url.scheme,
             request.url.netloc,
         )
-        card = build_agent_card(extended_config, base_url)
+        extra_protos = getattr(request.app.state, "additional_protocols", None)
+        card = build_agent_card(extended_config, base_url, extra_protos)
         return _result_response(
             req_id,
             card.model_dump(mode="json", by_alias=True, exclude_none=True),
         )
     except Exception as exc:
         return _error_response(req_id, INTERNAL_ERROR, str(exc))
+
+
+_JSONRPC_DISPATCH.update(
+    {
+        "message/send": _handle_message_send,
+        "message/sendStream": _handle_message_send_stream,
+        "tasks/get": _handle_tasks_get,
+        "tasks/list": _handle_tasks_list,
+        "tasks/cancel": _handle_tasks_cancel,
+        "tasks/resubscribe": _handle_tasks_resubscribe,
+        "tasks/pushNotificationConfig/set": _handle_push_set,
+        "tasks/pushNotificationConfig/get": _handle_push_get,
+        "tasks/pushNotificationConfig/list": _handle_push_list,
+        "tasks/pushNotificationConfig/delete": _handle_push_delete,
+        "agent/getAuthenticatedExtendedCard": _handle_get_extended_card,
+        "health": _handle_health,
+    }
+)

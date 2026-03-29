@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -58,6 +59,7 @@ class ContentTypeValidationMiddleware(BaseHTTPMiddleware):
         {
             "/.well-known/agent-card.json",
             "/v1/health",
+            "/v1/health/ready",
             "/chat",
         }
     )
@@ -342,27 +344,42 @@ class A2AServer:
             app.state.middlewares = middlewares
             app.state.capabilities = server._card_config.capabilities
             app.state.extended_card_provider = server._extended_card_provider
+            app.state.additional_protocols = server._additional_protocols or None
 
             await server._deps.startup()
-            async with storage, broker, event_bus, adapter.run():
-                try:
-                    yield
-                finally:
-                    if delivery_service:
-                        await delivery_service.shutdown()
-                    for attr in (
-                        "task_manager",
-                        "broker",
-                        "storage",
-                        "event_bus",
-                        "push_store",
-                        "middlewares",
-                        "capabilities",
-                        "extended_card_provider",
-                    ):
-                        if hasattr(app.state, attr):
-                            delattr(app.state, attr)
-                    await server._deps.shutdown()
+            try:
+                async with storage, broker, event_bus, adapter.run():
+                    try:
+                        yield
+                    finally:
+                        # Cancel tracked background tasks (e.g. _force_cancel_after)
+                        # to prevent them from outliving the lifespan.
+                        bg = list(tm._background_tasks)
+                        for task in bg:
+                            task.cancel()
+                        for task in bg:
+                            with suppress(asyncio.CancelledError):
+                                await task
+                        if hasattr(emitter, "shutdown"):
+                            await emitter.shutdown()
+                        if delivery_service:
+                            await delivery_service.shutdown()
+                        for attr in (
+                            "task_manager",
+                            "broker",
+                            "storage",
+                            "event_bus",
+                            "push_store",
+                            "middlewares",
+                            "capabilities",
+                            "extended_card_provider",
+                        ):
+                            if hasattr(app.state, attr):
+                                delattr(app.state, attr)
+            finally:
+                # Deps shutdown AFTER adapter.run().__aexit__ so workers
+                # that use deps (DB pools, etc.) are already stopped.
+                await server._deps.shutdown()
 
         fastapi_kwargs.setdefault("title", self._card_config.name)
         fastapi_kwargs.setdefault("version", self._card_config.version)

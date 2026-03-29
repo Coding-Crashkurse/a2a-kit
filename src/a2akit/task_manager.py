@@ -144,9 +144,12 @@ class TaskManager:
 
         task = await self._load_and_validate(message)
         # Bind message to task before persisting (message binding contract).
-        message.context_id = message.context_id or task.context_id
+        # Use model_copy to avoid mutating the caller's message object.
+        bound_message = message.model_copy(
+            update={"context_id": message.context_id or task.context_id}
+        )
         new_state = self._compute_state_transition(task)
-        await self.storage.update_task(task.id, state=new_state, messages=[message])
+        await self.storage.update_task(task.id, state=new_state, messages=[bound_message])
         # Re-load to return the updated Task object.
         updated = await self.storage.load_task(task.id)
         if updated is None:
@@ -226,8 +229,7 @@ class TaskManager:
                 )
                 await self.push_store.set_config(task.id, config)
 
-        params.message.context_id = context_id
-        params.message.task_id = task.id
+        params = self._bind_message(params, context_id, task.id)
 
         direct_message: Message | None = None
         if params.configuration and params.configuration.blocking:
@@ -245,7 +247,7 @@ class TaskManager:
 
                 try:
                     async with asyncio.timeout(self.default_blocking_timeout_s):
-                        async for ev in sub:
+                        async for _eid, ev in sub:
                             if isinstance(ev, DirectReply):
                                 direct_message = ev.message
                             if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
@@ -279,12 +281,30 @@ class TaskManager:
                 return reply
         return latest or task
 
+    @staticmethod
+    def _bind_message(
+        params: MessageSendParams, context_id: str, task_id: str
+    ) -> MessageSendParams:
+        """Return a copy of params with context_id and task_id bound.
+
+        Avoids mutating the caller's MessageSendParams object.
+        """
+        updated_msg = params.message.model_copy(
+            update={"context_id": context_id, "task_id": task_id}
+        )
+        return params.model_copy(update={"message": updated_msg})
+
     async def stream_message(
         self,
         params: MessageSendParams,
         request_context: dict[str, Any] | None = None,
-    ) -> AsyncGenerator[StreamEvent, None]:
+    ) -> AsyncGenerator[tuple[str | None, StreamEvent], None]:
         """Submit a task, yield initial snapshot, then stream live events.
+
+        Yields ``(event_id, event)`` tuples.  The snapshot has
+        ``event_id=None``; bus events carry the bus-assigned ID so that
+        SSE endpoints can use it as the ``id:`` field for correct
+        ``Last-Event-ID`` reconnection.
 
         Subscribes to the event bus BEFORE starting the broker to prevent
         a race condition where early events could be lost.
@@ -311,10 +331,9 @@ class TaskManager:
             if trimmed is not None:
                 task = trimmed
 
-        yield task
+        yield (None, task)
 
-        params.message.context_id = context_id
-        params.message.task_id = task.id
+        params = self._bind_message(params, context_id, task.id)
 
         # Subscribe BEFORE starting broker — prevents race condition
         # where events published between run_task and subscribe are lost.
@@ -327,15 +346,16 @@ class TaskManager:
                 )
             )
 
-            async for ev in sub:
-                yield ev
+            async for event_id, ev in sub:
+                yield (event_id, ev)
 
     async def subscribe_task(
         self, task_id: str, *, after_event_id: str | None = None
-    ) -> AsyncGenerator[StreamEvent, None]:
+    ) -> AsyncGenerator[tuple[str | None, StreamEvent], None]:
         """Subscribe to updates for an existing task.
 
-        Yields the current task state first, then streams live events.
+        Yields ``(event_id, event)`` tuples.  The initial task snapshot
+        has ``event_id=None``; bus events carry the bus-assigned ID.
         When ``after_event_id`` is provided (from SSE ``Last-Event-ID``
         header), backends that support replay (e.g. Redis Streams)
         deliver events published after that ID.
@@ -350,9 +370,9 @@ class TaskManager:
         # Subscribe BEFORE yielding — prevents event loss between
         # load_task and subscribe.
         async with self.event_bus.subscribe(task_id, after_event_id=after_event_id) as sub:
-            yield task
-            async for ev in sub:
-                yield ev
+            yield (None, task)
+            async for event_id, ev in sub:
+                yield (event_id, ev)
 
     async def get_task(self, task_id: str, history_length: int | None = None) -> Task | None:
         """Load a single task by ID."""

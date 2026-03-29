@@ -84,7 +84,7 @@ class TracingMiddleware(A2AMiddleware):
     async def after_dispatch(
         self,
         envelope: RequestEnvelope,
-        result: Task | Message,
+        result: Task | Message | None = None,
     ) -> None:
         """End the server span with result attributes."""
         span: Any = envelope.context.get("_otel_span")
@@ -92,15 +92,16 @@ class TracingMiddleware(A2AMiddleware):
         if span is None:
             return
 
-        if hasattr(result, "status") and result.status:
-            span.set_attribute(
-                ATTR_TASK_STATE,
-                result.status.state.value
-                if hasattr(result.status.state, "value")
-                else str(result.status.state),
-            )
-        if hasattr(result, "artifacts") and result.artifacts:
-            span.set_attribute(ATTR_ARTIFACT_COUNT, len(result.artifacts))
+        if result is not None:
+            if hasattr(result, "status") and result.status:
+                span.set_attribute(
+                    ATTR_TASK_STATE,
+                    result.status.state.value
+                    if hasattr(result.status.state, "value")
+                    else str(result.status.state),
+                )
+            if hasattr(result, "artifacts") and result.artifacts:
+                span.set_attribute(ATTR_ARTIFACT_COUNT, len(result.artifacts))
 
         span.set_status(StatusCode.OK)
         span.end()

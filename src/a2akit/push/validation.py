@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import socket
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,11 @@ _BLOCKED_RANGES = [
 ]
 
 
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Check whether an IP address falls into a blocked (private/loopback) range."""
+    return any(ip in blocked for blocked in _BLOCKED_RANGES)
+
+
 def validate_webhook_url(
     url: str,
     *,
@@ -31,7 +37,7 @@ def validate_webhook_url(
 
     Checks:
     1. Scheme is https (unless allow_http for dev)
-    2. No private/loopback IP addresses
+    2. No private/loopback IP addresses (resolved via DNS)
     3. No blocked hostnames
     4. Optional allowlist enforcement
     """
@@ -56,15 +62,32 @@ def validate_webhook_url(
 
     if blocked_hosts and hostname.lower() in blocked_hosts:
         return False
-    if allowed_hosts and hostname.lower() not in allowed_hosts:
-        return False
+    if allowed_hosts:
+        # Allowlist mode: skip DNS resolution — the operator explicitly trusts these hosts.
+        return hostname.lower() in allowed_hosts
 
+    # Check IP literals directly
     try:
         ip = ipaddress.ip_address(hostname)
-        for blocked in _BLOCKED_RANGES:
-            if ip in blocked:
-                return False
+        return not _is_blocked_ip(ip)
     except ValueError:
-        pass  # Hostname, not IP - that's fine
+        pass  # Not an IP literal — resolve via DNS below
+
+    # DNS resolution to prevent SSRF via hostname → private IP
+    try:
+        addrinfo = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        logger.warning("DNS resolution failed for webhook host %r", hostname)
+        return False
+
+    for _family, _type, _proto, _canonname, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if _is_blocked_ip(ip):
+            logger.warning(
+                "Webhook host %r resolves to blocked IP %s (SSRF protection)",
+                hostname,
+                ip,
+            )
+            return False
 
     return True

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -30,14 +30,18 @@ class EventBus(ABC):
     @abstractmethod
     def subscribe(
         self, task_id: str, *, after_event_id: str | None = None
-    ) -> AbstractAsyncContextManager[AsyncIterator[StreamEvent]]:
+    ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str | None, StreamEvent]]]:
         """Subscribe to stream events for a task.
 
         MUST be used as an async context manager:
 
             async with event_bus.subscribe(task_id) as stream:
-                async for event in stream:
+                async for event_id, event in stream:
                     ...
+
+        Yields ``(event_id, event)`` tuples so that SSE endpoints can
+        use the event-bus-assigned ID as the SSE ``id:`` field, ensuring
+        ``Last-Event-ID`` reconnection maps directly to bus replay IDs.
 
         The context manager guarantees cleanup of subscriber resources
         (e.g. Redis UNSUBSCRIBE, RabbitMQ consumer de-registration)
@@ -45,7 +49,7 @@ class EventBus(ABC):
 
         When ``after_event_id`` is provided, backends that support
         replay (e.g. Redis Streams) deliver events published after
-        that ID.  InMemory ignores this parameter.
+        that ID.  InMemory replays from its ring buffer.
 
         Implementations MUST yield events in the order they were
         published (per A2A spec §3.5.2).
@@ -67,6 +71,10 @@ class EventBus(ABC):
         Backends MUST implement this to avoid resource leaks
         (e.g. Redis UNSUBSCRIBE, key cleanup).
         """
+
+    async def health_check(self) -> dict[str, Any]:
+        """Check backend connectivity. Override for real checks."""
+        return {"status": "ok"}
 
     async def __aenter__(self) -> Self:
         """Enter the async context manager."""

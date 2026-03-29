@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.22] — 2026-03-29
+
+### Fixed
+- **SSE Event-ID mismatch** — SSE endpoints now use event-bus-assigned IDs instead
+  of a local counter, fixing `Last-Event-ID` reconnection replay.
+- **JSON-RPC streaming error handling** — `message/sendStream` and
+  `tasks/resubscribe` now eagerly evaluate the first event so validation errors
+  produce proper JSON-RPC error responses instead of broken SSE streams.
+- **Dependency shutdown order** — user-registered dependencies now shut down after
+  the worker adapter exits, preventing crashes in workers that use deps during
+  shutdown.
+- **Push delivery semaphore scope** — the concurrency semaphore is now held only
+  during the HTTP request, not during retry back-off sleeps.
+- **Push delivery queue race condition** — `deliver()` now detects dead queue
+  workers and restarts them instead of enqueueing into orphaned queues.
+- **Agent message metadata leak** — agent response messages no longer inherit the
+  user message's metadata.
+- **Readiness endpoint resilience** — `health/ready` now catches exceptions from
+  backend `health_check()` calls instead of returning HTTP 500.
+- **AgentCard spec compliance** — `additionalInterfaces` no longer includes the
+  primary interface; extended card endpoints now include `additional_protocols`.
+- **InMemoryEventBus replay duplicates** — replay phase now tracks
+  `last_yielded_id` to skip events already delivered via the live stream.
+- **SQL storage stale OCC version** — `ConcurrencyError` now forces a fresh
+  version read instead of reporting a stale value from the prior SELECT.
+- **Redis cancel scope hang** — unexpected exceptions in the Pub/Sub listener now
+  set the cancel event instead of leaving `wait()` blocked forever.
+- **params.message mutation** — `send_message` and `stream_message` no longer
+  mutate the caller's `MessageSendParams` object in-place.
+- **cancel context_id** — cancel events now fall back to `task.context_id` when the
+  caller-supplied context_id is None.
+- **PushDeliveryEmitter shutdown** — background delivery trigger tasks are now
+  cancelled during server shutdown.
+- **`respond("")` empty parts** — empty string now correctly produces a TextPart
+  instead of an empty parts list.
+- **`request_auth(details="")` ignored** — empty string details are now included
+  instead of being treated as None.
+- **Redis Stream ID comparison** — removed redundant lexicographic string
+  comparison that could theoretically fail for stream IDs of different lengths.
+- **Artifact metadata default** — `emit_artifact` no longer forces `metadata: {}`
+  when no metadata is provided.
+
 ## [0.0.21] — 2026-03-28
 
 ### Added

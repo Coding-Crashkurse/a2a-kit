@@ -56,12 +56,16 @@ async def cancel_task_in_storage(
     if task.status.state in TERMINAL_STATES:
         return
 
+    # Prefer the task's authoritative context_id over the caller-supplied
+    # value, which may be None when the cancellation path doesn't have it.
+    resolved_ctx = context_id or task.context_id
+
     cancel_message = Message(
         role=Role.agent,
         parts=[Part(TextPart(text=reason))],
         message_id=str(uuid.uuid4()),
         task_id=task_id,
-        context_id=context_id,
+        context_id=resolved_ctx,
     )
     version = await storage.get_version(task_id)
     try:
@@ -83,13 +87,17 @@ async def cancel_task_in_storage(
             if isinstance(exc, ConcurrencyError) and exc.current_version is not None
             else await storage.get_version(task_id)
         )
-        await emitter.update_task(
-            task_id,
-            state=TaskState.canceled,
-            status_message=cancel_message,
-            messages=[cancel_message],
-            expected_version=version,
-        )
+        try:
+            await emitter.update_task(
+                task_id,
+                state=TaskState.canceled,
+                status_message=cancel_message,
+                messages=[cancel_message],
+                expected_version=version,
+            )
+        except (ConcurrencyError, TaskTerminalStateError):
+            logger.warning("Cancel retry failed for task %s, task may have been modified", task_id)
+            return
 
     status = TaskStatus(
         state=TaskState.canceled,
@@ -101,7 +109,7 @@ async def cancel_task_in_storage(
         TaskStatusUpdateEvent(
             kind="status-update",
             task_id=task_id,
-            context_id=context_id,
+            context_id=resolved_ctx,
             status=status,
             final=True,
         ),

@@ -17,15 +17,16 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from a2akit.agent_card import AgentCardConfig, build_agent_card, external_base_url
 from a2akit.middleware import A2AMiddleware, RequestEnvelope
-from a2akit.schema import DirectReply, StreamEvent
+from a2akit.schema import DirectReply
 from a2akit.storage.base import (
     ListTasksQuery,
     UnsupportedOperationError,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
+    from a2akit.schema import StreamEvent
     from a2akit.task_manager import TaskManager
 
 SUPPORTED_A2A_VERSION = "0.3.0"
@@ -162,7 +163,12 @@ def _validate_ids(params: MessageSendParams) -> MessageSendParams:
 async def _stream_setup(
     request: Request,
     params: MessageSendParams,
-) -> tuple[StreamEvent, AsyncIterator[StreamEvent]]:
+) -> tuple[
+    tuple[str | None, StreamEvent],
+    AsyncGenerator[tuple[str | None, StreamEvent], None],
+    list[A2AMiddleware],
+    RequestEnvelope,
+]:
     """Dependency: validate, run middleware, and fetch the first stream event.
 
     Runs in normal async context so that exceptions produce proper
@@ -178,15 +184,19 @@ async def _stream_setup(
         await mw.before_dispatch(envelope, request)
 
     agen = tm.stream_message(envelope.params, request_context=envelope.context)
-    first_event = await anext(agen)
-    return first_event, agen
+    try:
+        first_pair = await anext(agen)
+    except BaseException:
+        await agen.aclose()
+        raise
+    return first_pair, agen, middlewares, envelope
 
 
 async def _subscribe_setup(
     request: Request,
     task_id: str = Path(),
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
-) -> tuple[StreamEvent, AsyncIterator[StreamEvent]]:
+) -> tuple[tuple[str | None, StreamEvent], AsyncGenerator[tuple[str | None, StreamEvent], None]]:
     """Dependency: look up task, validate state, and fetch the first event.
 
     Runs in normal async context so that TaskNotFoundError and
@@ -195,8 +205,12 @@ async def _subscribe_setup(
     _check_streaming(request)
     tm = _get_tm(request)
     agen = tm.subscribe_task(task_id, after_event_id=last_event_id)
-    first_event = await anext(agen)
-    return first_event, agen
+    try:
+        first_pair = await anext(agen)
+    except BaseException:
+        await agen.aclose()
+        raise
+    return first_pair, agen
 
 
 def build_a2a_router() -> APIRouter:
@@ -228,7 +242,12 @@ def build_a2a_router() -> APIRouter:
 
     @router.post("/v1/message:stream", response_class=EventSourceResponse, tags=["Messages"])
     async def message_stream(
-        setup: tuple[StreamEvent, AsyncIterator[StreamEvent]] = Depends(_stream_setup),
+        setup: tuple[
+            tuple[str | None, StreamEvent],
+            AsyncGenerator[tuple[str | None, StreamEvent], None],
+            list[A2AMiddleware],
+            RequestEnvelope,
+        ] = Depends(_stream_setup),
     ) -> AsyncIterable[ServerSentEvent]:
         """Submit a message and stream events via SSE.
 
@@ -238,19 +257,24 @@ def build_a2a_router() -> APIRouter:
 
         This generator body runs inside FastAPI's SSE producer TaskGroup
         and only contains yield statements.
+
+        SSE ``id:`` fields use the event-bus-assigned ID (not a local
+        counter) so that ``Last-Event-ID`` reconnection maps correctly.
         """
-        first_event, agen = setup
-        sse_id = 0
+        first_pair, agen, middlewares, envelope = setup
         try:
-            sse_id += 1
-            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=str(sse_id))
-            async for ev in agen:
+            eid, first_event = first_pair
+            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=eid)
+            async for eid, ev in agen:
                 if isinstance(ev, DirectReply):
                     continue
-                sse_id += 1
-                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=str(sse_id))
+                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=eid)
         except Exception:
             logger.exception("SSE stream aborted")
+        finally:
+            await agen.aclose()
+            for mw in reversed(middlewares):
+                await mw.after_dispatch(envelope)
 
     @router.get("/v1/tasks/{task_id}", tags=["Tasks"])
     async def tasks_get(
@@ -313,7 +337,10 @@ def build_a2a_router() -> APIRouter:
         "/v1/tasks/{task_id}:subscribe", response_class=EventSourceResponse, tags=["Tasks"]
     )
     async def tasks_subscribe(
-        setup: tuple[StreamEvent, AsyncIterator[StreamEvent]] = Depends(_subscribe_setup),
+        setup: tuple[
+            tuple[str | None, StreamEvent],
+            AsyncGenerator[tuple[str | None, StreamEvent], None],
+        ] = Depends(_subscribe_setup),
     ) -> AsyncIterable[ServerSentEvent]:
         """Subscribe to updates for an existing task via SSE.
 
@@ -321,18 +348,18 @@ def build_a2a_router() -> APIRouter:
         runs in the ``_subscribe_setup`` dependency — in the normal request
         context where exceptions produce proper HTTP error responses.
         """
-        first_event, agen = setup
-        sse_id = 0
+        first_pair, agen = setup
         try:
-            sse_id += 1
-            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=str(sse_id))
-            async for ev in agen:
+            eid, first_event = first_pair
+            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=eid)
+            async for eid, ev in agen:
                 if isinstance(ev, DirectReply):
                     continue
-                sse_id += 1
-                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=str(sse_id))
+                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=eid)
         except Exception:
             logger.exception("SSE subscribe stream aborted")
+        finally:
+            await agen.aclose()
 
     @router.post("/v1/tasks/{task_id}/pushNotificationConfigs", tags=["Push Notifications"])
     async def push_config_set(request: Request, task_id: str = Path()) -> JSONResponse:
@@ -408,13 +435,40 @@ def build_a2a_router() -> APIRouter:
             request.url.scheme,
             request.url.netloc,
         )
-        card = build_agent_card(extended_config, base_url)
+        extra_protos = getattr(request.app.state, "additional_protocols", None)
+        card = build_agent_card(extended_config, base_url, extra_protos)
         return JSONResponse(content=card.model_dump(mode="json", by_alias=True, exclude_none=True))
 
     @router.get("/v1/health", tags=["Health"])
     async def health_check() -> dict[str, str]:
-        """Return a simple health status."""
+        """Return a simple liveness status."""
         return {"status": "ok"}
+
+    @router.get("/v1/health/ready", tags=["Health"])
+    async def readiness_check(request: Request) -> JSONResponse:
+        """Deep readiness check — pings all backend components."""
+        components: dict[str, Any] = {}
+
+        for name in ("storage", "broker", "event_bus"):
+            backend = getattr(request.app.state, name, None)
+            if backend is None:
+                components[name] = {"status": "unavailable"}
+                continue
+            try:
+                result = await backend.health_check()
+            except Exception as exc:
+                result = {"status": "error", "error": str(exc)}
+            result["type"] = type(backend).__name__
+            components[name] = result
+
+        all_ok = all(c.get("status") == "ok" for c in components.values())
+        status = "ok" if all_ok else "degraded"
+        code = 200 if all_ok else 503
+
+        return JSONResponse(
+            content={"status": status, "components": components},
+            status_code=code,
+        )
 
     return router
 

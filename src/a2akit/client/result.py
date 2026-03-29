@@ -175,12 +175,19 @@ class StreamEvent:
 
     raw: Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent
 
+    task_id: str | None = None
+    event_id: str | None = None
+
     @classmethod
     def from_raw(
-        cls, event: Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent
+        cls,
+        event: Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
+        *,
+        event_id: str | None = None,
     ) -> StreamEvent:
         """Build StreamEvent from a raw protocol event."""
         if isinstance(event, Task):
+            task_id = event.id
             state = event.status.state.value if event.status else None
             text: str | None = None
             data: dict[str, Any] | None = None
@@ -202,6 +209,8 @@ class StreamEvent:
                 artifact_id=None,
                 is_final=is_final,
                 raw=event,
+                task_id=task_id,
+                event_id=event_id,
             )
 
         if isinstance(event, TaskStatusUpdateEvent):
@@ -218,6 +227,8 @@ class StreamEvent:
                 artifact_id=None,
                 is_final=bool(event.final),
                 raw=event,
+                task_id=event.task_id,
+                event_id=event_id,
             )
 
         # TaskArtifactUpdateEvent
@@ -231,6 +242,8 @@ class StreamEvent:
             artifact_id=artifact.artifact_id,
             is_final=bool(event.last_chunk),
             raw=event,
+            task_id=event.task_id,
+            event_id=event_id,
         )
 
 

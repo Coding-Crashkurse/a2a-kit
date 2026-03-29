@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from a2akit.event_emitter import EventEmitter
@@ -76,6 +77,14 @@ class PushDeliveryEmitter(EventEmitter):
                 await self._delivery.deliver(configs, task)
         except Exception:
             logger.exception("Push delivery trigger failed for task %s", task_id)
+
+    async def shutdown(self) -> None:
+        """Cancel outstanding delivery trigger tasks."""
+        for t in list(self._background_tasks):
+            t.cancel()
+        for t in list(self._background_tasks):
+            with suppress(asyncio.CancelledError):
+                await t
 
     async def send_event(self, task_id: str, event: StreamEvent) -> None:
         await self._inner.send_event(task_id, event)

@@ -604,9 +604,9 @@ async def test_stream_message_registers_push_config():
             },
         )
 
-        # stream_message yields the task snapshot first.
+        # stream_message yields (event_id, task snapshot) first.
         agen = tm.stream_message(params)
-        task = await anext(agen)
+        _eid, task = await anext(agen)
         task_id = task.id
 
         # Verify push config was stored by stream_message.

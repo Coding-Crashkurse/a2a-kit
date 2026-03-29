@@ -107,7 +107,7 @@ class WorkerAdapter:
                     await self._handle_op_inner(handle)
             else:
                 await self._handle_op_inner(handle)
-        except BaseException:
+        except Exception:
             logger.exception("Unrecoverable error in operation handler")
 
     async def _handle_op_inner(self, handle: OperationHandle) -> None:
@@ -283,7 +283,10 @@ class WorkerAdapter:
                         tg.cancel_scope.cancel()
 
                     if cancel_event.is_set() and not ctx.turn_ended:
-                        await ctx._flush_artifacts()
+                        try:
+                            await ctx._flush_artifacts()
+                        except Exception:
+                            logger.warning("flush_artifacts failed during cancel for %s", task_id)
                         await self._mark_canceled(
                             self._storage, self._emitter, task_id, context_id
                         )
@@ -292,7 +295,10 @@ class WorkerAdapter:
                 except anyio.get_cancelled_exc_class():
                     if span:
                         span.add_event(EVENT_CANCEL_REQUESTED)
-                    await ctx._flush_artifacts()
+                    try:
+                        await ctx._flush_artifacts()
+                    except Exception:
+                        logger.warning("flush_artifacts failed during cancel for %s", task_id)
                     await self._mark_canceled(self._storage, self._emitter, task_id, context_id)
                 except TaskTerminalStateError:
                     logger.info("Task %s reached terminal state during processing", task_id)
@@ -303,7 +309,12 @@ class WorkerAdapter:
                         from opentelemetry.trace import StatusCode
 
                         span.set_status(StatusCode.ERROR, str(exc))
-                    await ctx._flush_artifacts()
+                    try:
+                        await ctx._flush_artifacts()
+                    except Exception:
+                        logger.warning(
+                            "flush_artifacts failed during error handling for %s", task_id
+                        )
                     await self._mark_failed(emitter, self._storage, task_id, context_id, str(exc))
                 else:
                     if span:
