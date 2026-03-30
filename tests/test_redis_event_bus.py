@@ -59,7 +59,7 @@ async def test_live_subscriber_receives_events(redis_event_bus):
 
     async def subscriber():
         async with redis_event_bus.subscribe(task_id) as stream:
-            async for ev in stream:
+            async for _eid, ev in stream:
                 received.append(ev)
                 if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
                     break
@@ -86,7 +86,7 @@ async def test_replay_after_event_id(redis_event_bus):
     # Subscribe after_event_id=id1 — should get events 2 and 3
     received = []
     async with redis_event_bus.subscribe(task_id, after_event_id=id1) as stream:
-        async for ev in stream:
+        async for _eid, ev in stream:
             received.append(ev)
             if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
                 break
@@ -114,7 +114,7 @@ async def test_final_event_ends_iterator(redis_event_bus):
 
     async def subscriber():
         async with redis_event_bus.subscribe(task_id) as stream:
-            async for ev in stream:
+            async for _eid, ev in stream:
                 received.append(ev)
 
     async with anyio.create_task_group() as tg:
@@ -142,7 +142,7 @@ async def test_key_prefix_isolation():
 
         async def sub_b():
             async with bus_b.subscribe(task_id) as stream:
-                async for ev in stream:
+                async for _eid, ev in stream:
                     received_b.append(ev)
                     break
 
