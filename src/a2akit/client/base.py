@@ -224,7 +224,11 @@ class A2AClient:
         self._connected = False
 
     async def __aenter__(self) -> Self:
-        await self.connect()
+        try:
+            await self.connect()
+        except BaseException:
+            await self.close()
+            raise
         return self
 
     async def __aexit__(self, *args: Any) -> None:

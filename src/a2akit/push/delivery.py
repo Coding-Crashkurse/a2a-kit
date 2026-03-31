@@ -99,14 +99,15 @@ class WebhookDeliveryService:
                 worker = asyncio.create_task(self._queue_worker(queue_key, queue, config))
                 self._queue_workers[queue_key] = worker
                 worker.add_done_callback(
-                    lambda fut, k=queue_key: self._cleanup_queue(k)  # type: ignore[misc]
+                    lambda fut, k=queue_key: self._cleanup_queue(k, fut)  # type: ignore[misc]
                 )
 
             self._delivery_queues[queue_key].put_nowait(task)
 
-    def _cleanup_queue(self, key: tuple[str, str]) -> None:
-        self._delivery_queues.pop(key, None)
-        self._queue_workers.pop(key, None)
+    def _cleanup_queue(self, key: tuple[str, str], finished_worker: asyncio.Task[None]) -> None:
+        if self._queue_workers.get(key) is finished_worker:
+            self._delivery_queues.pop(key, None)
+            self._queue_workers.pop(key, None)
 
     async def _queue_worker(
         self,
@@ -119,6 +120,8 @@ class WebhookDeliveryService:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=self._idle_timeout)
             except TimeoutError:
+                if not queue.empty():
+                    continue
                 logger.debug("Idle timeout reached for delivery queue %s", key)
                 break
             if item is None:
@@ -149,7 +152,7 @@ class WebhookDeliveryService:
         pnc = config.push_notification_config
         url = pnc.url
 
-        if not validate_webhook_url(
+        if not await validate_webhook_url(
             url,
             allow_http=self._allow_http,
             allowed_hosts=self._allowed_hosts,

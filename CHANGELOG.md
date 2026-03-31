@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.23] — 2026-03-31
+
+### Fixed
+- **Blocking timeout spec compliance** — `send_message` with `blocking=True` now
+  returns the task in its current state on timeout instead of raising
+  `UnsupportedOperationError` (HTTP 400), per A2A v0.3.0 §3.1.2.
+- **Broker failure in blocking/streaming paths** — both `send_message` (blocking)
+  and `stream_message` now wrap `broker.run_task` in `_enqueue_or_fail`, so a Redis
+  outage marks the task as `failed` instead of leaving it stuck in `submitted`.
+- **Follow-up message idempotency** — retried follow-up messages with the same
+  `messageId` are now deduplicated against `task.history`, preventing duplicate
+  appends and double-processing.
+- **Middleware OTel span leak** — `after_dispatch` is now called in a `try/except`
+  guard so `TracingMiddleware` always ends its span and detaches the OTel token,
+  even when `send_message` raises.
+- **Redis event bus SSE hang** — the live Pub/Sub loop now polls the Redis Stream
+  on every timeout (1 s) as a fallback, preventing permanent SSE freezes when a
+  Pub/Sub wakeup signal is lost over the network.
+- **Redis task lock factory crash** — changed from `async def` to `def` so the
+  factory returns a Lock (async context manager) directly instead of a coroutine,
+  fixing `AttributeError: 'coroutine' object has no attribute '__aenter__'`.
+- **Client SSE multi-line parsing** — the SSE parser now buffers `data:` lines and
+  parses on empty-line boundaries per the W3C Server-Sent Events specification,
+  fixing `JSONDecodeError` when connecting to servers that pretty-print JSON.
+- **JSON-RPC client streaming error swallowed** — `stream_message` and
+  `subscribe_task` now check the `Content-Type` header; a non-SSE JSON-RPC error
+  response is properly raised as `ProtocolError` instead of yielding an empty stream.
+- **Webhook delivery race conditions** — idle-timeout worker now checks
+  `queue.empty()` before exiting; `_cleanup_queue` verifies worker identity to
+  prevent a `call_soon`-scheduled callback from deleting a replacement worker's queue.
+- **Redis broker poison pill** — `XAUTOCLAIM` now tracks hard-crash claims via a
+  Redis Hash (`crash_counts`). Messages whose `base_attempt + claim_count` exceeds
+  `max_retries` are moved to the DLQ, preventing an OOM-inducing message from
+  cycling through the cluster indefinitely.
+- **AnyIO cancellation cleanup** — worker `except Cancelled` and `finally` blocks
+  now use `CancelScope(shield=True)` so that `_flush_artifacts`, `_mark_canceled`,
+  and event-bus/cancel-registry cleanup actually execute during server shutdown
+  instead of being immediately re-cancelled.
+- **SQL pagination non-deterministic sort** — `list_tasks` now uses
+  `(status_timestamp DESC, id DESC)` as sort key, preventing duplicate/missing
+  tasks when multiple tasks share the same timestamp.
+- **Stale status timestamp** — status-message-only updates (no state change) now
+  update `status_timestamp` to the current time in all three storage backends,
+  so polling clients see progress instead of a frozen timestamp.
+- **FastAPI 422 → A2A error format** — `RequestValidationError` now returns
+  `{"code": -32600, "message": "Invalid request parameters"}` instead of FastAPI's
+  default `{"detail": [...]}` array.
+- **Redis storage defensive deserialization** — empty `history` / `artifacts` hash
+  fields (e.g. from manual tampering) now fall back to `"[]"` instead of crashing
+  with `json.loads("")`.
+- **Telemetry version** — `TRACER_VERSION` is now read dynamically from package
+  metadata via `importlib.metadata.version("a2akit")`.
+- **JSON-RPC `"params": null` crash** — `body.get("params", {})` replaced with
+  `body.get("params") or {}` to handle explicit JSON `null`, preventing
+  `AttributeError` in all JSON-RPC method handlers.
+- **JSON-RPC auth error code** — `AuthenticationRequiredError` is now mapped to
+  `-32600` with a descriptive message instead of falling through to `-32603
+  Internal Error`.
+- **`A2AClient` HTTP client leak** — `__aenter__` now calls `close()` if
+  `connect()` fails, preventing the internally-created `httpx.AsyncClient` from
+  leaking when the agent card fetch or validation raises.
+
 ## [0.0.22] — 2026-03-29
 
 ### Fixed

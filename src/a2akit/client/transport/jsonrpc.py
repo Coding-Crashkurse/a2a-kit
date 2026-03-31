@@ -120,6 +120,15 @@ class JsonRpcTransport(Transport):
             if not response.is_success:
                 await response.aread()
                 raise ProtocolError(f"HTTP {response.status_code}: {response.text}")
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                await response.aread()
+                try:
+                    data = response.json()
+                except Exception as exc:
+                    raise ProtocolError(f"Expected SSE stream, got {content_type}") from exc
+                self._handle_response(data)
+                return
             async for event in parse_sse_stream(response, unwrap_jsonrpc=True):
                 yield event
 
@@ -158,6 +167,15 @@ class JsonRpcTransport(Transport):
             if not response.is_success:
                 await response.aread()
                 raise ProtocolError(f"HTTP {response.status_code}: {response.text}")
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                await response.aread()
+                try:
+                    data = response.json()
+                except Exception as exc:
+                    raise ProtocolError(f"Expected SSE stream, got {content_type}") from exc
+                self._handle_response(data, task_id=task_id)
+                return
             async for event in parse_sse_stream(response, unwrap_jsonrpc=True):
                 yield event
 

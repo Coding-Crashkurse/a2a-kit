@@ -106,6 +106,21 @@ class TaskManager:
         if not fut.cancelled() and fut.exception():
             logger.error("Background task failed: %s", fut.exception(), exc_info=fut.exception())
 
+    async def _enqueue_or_fail(self, task_id: str, coro: Any) -> None:
+        """Await *coro* (broker.run_task); on failure mark the task as failed.
+
+        Without this wrapper a broker error (e.g. Redis down) would leave
+        the task stuck in ``submitted`` forever.
+        """
+        try:
+            await coro
+        except Exception:
+            logger.error("Broker enqueue failed for task %s, marking as failed", task_id)
+            try:
+                await self.storage.update_task(task_id, state=TaskState.failed)
+            except Exception:
+                logger.exception("Could not mark task %s as failed after broker error", task_id)
+
     def _validate_input_modes(self, message: Message) -> None:
         """Validate message parts against declared input modes (A2A §8.2 -32005)."""
         if not self.input_modes:
@@ -143,13 +158,24 @@ class TaskManager:
             )
 
         task = await self._load_and_validate(message)
+        # Idempotency: skip if this message was already appended (client retry).
+        if task.history and any(m.message_id == message.message_id for m in task.history):
+            return task
         # Bind message to task before persisting (message binding contract).
         # Use model_copy to avoid mutating the caller's message object.
         bound_message = message.model_copy(
             update={"context_id": message.context_id or task.context_id}
         )
         new_state = self._compute_state_transition(task)
-        await self.storage.update_task(task.id, state=new_state, messages=[bound_message])
+        # Pass the current version for OCC — prevents two concurrent
+        # follow-ups from silently overwriting each other's history.
+        version = await self.storage.get_version(task.id)
+        await self.storage.update_task(
+            task.id,
+            state=new_state,
+            messages=[bound_message],
+            expected_version=version,
+        )
         # Re-load to return the updated Task object.
         updated = await self.storage.load_task(task.id)
         if updated is None:
@@ -238,10 +264,13 @@ class TaskManager:
             # be lost if we subscribed after.
             async with self.event_bus.subscribe(task.id) as sub:
                 self._track_background(
-                    self.broker.run_task(
-                        params,
-                        is_new_task=is_new,
-                        request_context=request_context,
+                    self._enqueue_or_fail(
+                        task.id,
+                        self.broker.run_task(
+                            params,
+                            is_new_task=is_new,
+                            request_context=request_context,
+                        ),
                     )
                 )
 
@@ -254,19 +283,18 @@ class TaskManager:
                                 break
                 except TimeoutError:
                     logger.info("Blocking wait timed out for task %s", task.id)
-                    latest = await self.storage.load_task(task.id)
-                    if latest is None or latest.status.state not in TERMINAL_STATES:
-                        raise UnsupportedOperationError(
-                            f"Task {task.id} did not complete within "
-                            f"{self.default_blocking_timeout_s}s blocking timeout"
-                        ) from None
         else:
-            # Non-blocking: just enqueue and return immediately
+            # Non-blocking: just enqueue and return immediately.
+            # Wrapped in _enqueue_or_fail so a broker error marks the
+            # task as failed instead of leaving it stuck in submitted.
             self._track_background(
-                self.broker.run_task(
-                    params,
-                    is_new_task=is_new,
-                    request_context=request_context,
+                self._enqueue_or_fail(
+                    task.id,
+                    self.broker.run_task(
+                        params,
+                        is_new_task=is_new,
+                        request_context=request_context,
+                    ),
                 )
             )
 
@@ -339,10 +367,13 @@ class TaskManager:
         # where events published between run_task and subscribe are lost.
         async with self.event_bus.subscribe(task.id) as sub:
             self._track_background(
-                self.broker.run_task(
-                    params,
-                    is_new_task=is_new,
-                    request_context=request_context,
+                self._enqueue_or_fail(
+                    task.id,
+                    self.broker.run_task(
+                        params,
+                        is_new_task=is_new,
+                        request_context=request_context,
+                    ),
                 )
             )
 

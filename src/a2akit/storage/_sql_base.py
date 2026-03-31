@@ -313,6 +313,7 @@ class SQLStorageBase(Storage[ContextT]):
             elif status_message is not None:
                 # Update status message without a state transition (e.g. progress text)
                 values["status_message"] = self._serialize_message(status_message)
+                values["status_timestamp"] = datetime.now(UTC).isoformat()
 
             result = await session.execute(
                 tasks_table.update()
@@ -366,7 +367,7 @@ class SQLStorageBase(Storage[ContextT]):
                 data_q = data_q.where(cond)
             offset = int(query.page_token) if query.page_token else 0
             data_q = (
-                data_q.order_by(tasks_table.c.status_timestamp.desc())
+                data_q.order_by(tasks_table.c.status_timestamp.desc(), tasks_table.c.id.desc())
                 .offset(offset)
                 .limit(query.page_size)
             )

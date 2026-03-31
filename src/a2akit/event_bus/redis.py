@@ -239,11 +239,9 @@ class RedisEventBus(EventBus):
         # Phase 3: Live — Pub/Sub wakeup + XREAD for actual data
         while True:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message is None:
+            if message is not None and message["type"] != "message":
                 continue
-            if message["type"] != "message":
-                continue
-            # Wakeup received — read new entries from the stream
+            # Wakeup or timeout — poll stream (Pub/Sub is at-most-once)
             try:
                 entries = await self._r.xrange(stream_key, min=f"({last_seen_id}", max="+")
                 for entry_id, fields in entries:

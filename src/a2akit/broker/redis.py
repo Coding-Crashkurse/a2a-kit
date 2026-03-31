@@ -30,7 +30,7 @@ except ImportError as _import_error:
     ) from _import_error
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Callable
     from types import TracebackType
 
     from a2a.types import MessageSendParams
@@ -262,6 +262,7 @@ class RedisOperationHandle(OperationHandle):
         serialized_op: bytes,
         attempt: int,
         max_retries: int,
+        crash_count_key: str = "",
     ) -> None:
         self._redis = redis_client
         self._stream_key = stream_key
@@ -272,6 +273,7 @@ class RedisOperationHandle(OperationHandle):
         self._serialized_op = serialized_op
         self._attempt = attempt
         self._max_retries = max_retries
+        self._crash_count_key = crash_count_key
 
     @property
     def operation(self) -> TaskOperation:
@@ -286,6 +288,13 @@ class RedisOperationHandle(OperationHandle):
     async def ack(self) -> None:
         """XACK the message."""
         await self._redis.xack(self._stream_key, self._group_name, self._msg_id)
+        await self._clear_crash_count()
+
+    async def _clear_crash_count(self) -> None:
+        """Remove crash-claim tracking for this message."""
+        if self._crash_count_key:
+            mid = self._msg_id.decode() if isinstance(self._msg_id, bytes) else str(self._msg_id)
+            await self._redis.hdel(self._crash_count_key, mid)
 
     async def nack(self, *, delay_seconds: float = 0) -> None:
         """XACK original + XADD new entry with attempt+1.
@@ -305,6 +314,7 @@ class RedisOperationHandle(OperationHandle):
                 {b"op": self._serialized_op, b"attempt": str(next_attempt).encode()},
             )
             await self._redis.xack(self._stream_key, self._group_name, self._msg_id)
+            await self._clear_crash_count()
             return
 
         if delay_seconds > 0:
@@ -318,6 +328,7 @@ class RedisOperationHandle(OperationHandle):
                 {b"op": self._serialized_op, b"attempt": str(next_attempt).encode()},
             )
             await pipe.execute()
+        await self._clear_crash_count()
 
 
 class RedisBroker(Broker):
@@ -347,6 +358,7 @@ class RedisBroker(Broker):
         stream = stream_name or s.redis_broker_stream
         self._stream_key = f"{self._key_prefix}stream:{stream}"
         self._dlq_key = f"{self._key_prefix}dlq:{stream}"
+        self._crash_count_key = f"{self._key_prefix}crash_counts"
         self._group_name = group_name or f"{self._key_prefix}{s.redis_broker_group}"
         prefix = consumer_prefix or s.redis_broker_consumer_prefix
         self._consumer_name = (
@@ -493,6 +505,7 @@ class RedisBroker(Broker):
                             serialized_op=fields[b"op"],
                             attempt=attempt,
                             max_retries=self._max_retries,
+                            crash_count_key=self._crash_count_key,
                         )
                     except Exception:
                         logger.exception("Failed to deserialize operation %s", msg_id)
@@ -516,8 +529,33 @@ class RedisBroker(Broker):
                     continue
                 try:
                     op = _deserialize_operation(fields)
-                    attempt = int(fields.get(b"attempt", b"1"))
-                    logger.warning("Claimed stale message %s (attempt %d)", msg_id, attempt)
+                    base_attempt = int(fields.get(b"attempt", b"1"))
+                    # Track hard-crash claims to detect poison pill messages.
+                    # Workers that die (OOM/segfault) never call nack(), so
+                    # the payload's attempt counter stays frozen. This hash
+                    # counts XAUTOCLAIM re-deliveries to catch the loop.
+                    mid = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+                    claim_count = await self._r.hincrby(self._crash_count_key, mid, 1)
+                    effective_attempt = base_attempt + claim_count
+                    if effective_attempt > self._max_retries:
+                        logger.error(
+                            "Poison pill: message %s claimed %d times, moving to DLQ",
+                            msg_id,
+                            claim_count,
+                        )
+                        await self._r.xadd(
+                            self._dlq_key,
+                            {
+                                b"op": fields[b"op"],
+                                b"attempt": str(effective_attempt).encode(),
+                            },
+                        )
+                        await self._r.xack(self._stream_key, self._group_name, msg_id)
+                        await self._r.hdel(self._crash_count_key, mid)
+                        continue
+                    logger.warning(
+                        "Claimed stale message %s (attempt %d)", msg_id, effective_attempt
+                    )
                     yield RedisOperationHandle(
                         redis_client=self._r,
                         stream_key=self._stream_key,
@@ -526,8 +564,9 @@ class RedisBroker(Broker):
                         msg_id=msg_id,
                         op=op,
                         serialized_op=fields[b"op"],
-                        attempt=attempt,
+                        attempt=effective_attempt,
                         max_retries=self._max_retries,
+                        crash_count_key=self._crash_count_key,
                     )
                 except Exception:
                     logger.exception("Failed to deserialize claimed message %s", msg_id)
@@ -540,7 +579,7 @@ class RedisBroker(Broker):
 def redis_task_lock_factory(
     redis_client: aioredis.Redis,
     timeout: int = 300,
-) -> Callable[[str], Coroutine[Any, Any, Any]]:
+) -> Callable[[str], Any]:
     """Return a task lock factory using Redis distributed locks.
 
     Usage::
@@ -553,7 +592,7 @@ def redis_task_lock_factory(
         )
     """
 
-    async def _acquire_lock(task_id: str) -> Any:
+    def _create_lock(task_id: str) -> Any:
         return redis_client.lock(f"a2akit:tasklock:{task_id}", timeout=timeout)
 
-    return _acquire_lock
+    return _create_lock

@@ -230,7 +230,7 @@ class InMemoryStorage(Storage[ContextT]):
             # Update status message without a state transition (e.g. progress text)
             task.status = TaskStatus(
                 state=task.status.state,
-                timestamp=task.status.timestamp,
+                timestamp=datetime.now(UTC).isoformat(),
                 message=status_message,
             )
 

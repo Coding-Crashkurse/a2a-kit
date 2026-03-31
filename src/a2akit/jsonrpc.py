@@ -98,8 +98,11 @@ def _map_exception_to_error(req_id: Any, exc: Exception) -> JSONResponse:
             "Invalid agent response",
             {"detail": exc.detail},
         )
+    from a2akit.errors import AuthenticationRequiredError
     from a2akit.push.endpoints import PushConfigNotFoundError
 
+    if isinstance(exc, AuthenticationRequiredError):
+        return _error_response(req_id, INVALID_REQUEST, f"{exc.scheme} authentication required")
     if isinstance(exc, PushConfigNotFoundError):
         return _error_response(req_id, TASK_NOT_FOUND, str(exc))
     return _error_response(req_id, INTERNAL_ERROR, str(exc))
@@ -151,7 +154,7 @@ def build_jsonrpc_router() -> APIRouter:
 
         req_id, body = parsed
         method = body["method"]
-        params = body.get("params", {})
+        params = body.get("params") or {}
 
         handler = _JSONRPC_DISPATCH.get(method)
         if handler is None:
@@ -185,7 +188,12 @@ async def _handle_message_send(
         for mw in middlewares:
             await mw.before_dispatch(envelope, request)
 
-        result = await tm.send_message(envelope.params, request_context=envelope.context)
+        try:
+            result = await tm.send_message(envelope.params, request_context=envelope.context)
+        except Exception:
+            for mw in reversed(middlewares):
+                await mw.after_dispatch(envelope)
+            raise
 
         for mw in reversed(middlewares):
             await mw.after_dispatch(envelope, result)

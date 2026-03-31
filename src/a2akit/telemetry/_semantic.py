@@ -3,7 +3,12 @@
 # Tracer / Meter identity
 TRACER_NAME = "a2akit"
 METER_NAME = "a2akit"
-TRACER_VERSION = "0.0.13"
+try:
+    from importlib.metadata import PackageNotFoundError, version
+
+    TRACER_VERSION = version("a2akit")
+except PackageNotFoundError:
+    TRACER_VERSION = "dev"
 
 SPAN_TASK_PROCESS = "a2akit.task.process"
 SPAN_HTTP_REQUEST = "a2akit.http.request"

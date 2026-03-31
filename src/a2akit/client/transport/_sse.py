@@ -15,6 +15,20 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
+def _parse_json_payload(payload: str, unwrap_jsonrpc: bool) -> Any:
+    """Parse JSON and optionally unwrap JSON-RPC envelope."""
+    try:
+        raw = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ProtocolError(f"Invalid JSON in SSE data: {exc}") from exc
+    if unwrap_jsonrpc and isinstance(raw, dict):
+        if "error" in raw:
+            err = raw["error"]
+            raise ProtocolError(f"JSON-RPC error {err.get('code')}: {err.get('message')}")
+        raw = raw.get("result", raw)
+    return raw
+
+
 async def parse_sse_stream(
     response: httpx.Response,
     *,
@@ -31,34 +45,36 @@ async def parse_sse_stream(
     """
     try:
         current_event_id: str | None = None
+        data_lines: list[str] = []
+
         async for line in response.aiter_lines():
             line = line.strip()
 
             if line.startswith("id:"):
                 current_event_id = line[len("id:") :].strip() or None
-                continue
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].strip())
+            elif not line and data_lines:
+                # Empty line = end of SSE event block (W3C spec)
+                payload = "\n".join(data_lines)
+                data_lines = []
+                if not payload:
+                    current_event_id = None
+                    continue
+                yield _deserialize_event(
+                    _parse_json_payload(payload, unwrap_jsonrpc),
+                    event_id=current_event_id,
+                )
+                current_event_id = None
 
-            if not line.startswith("data:"):
-                continue
-
-            payload = line[len("data:") :].strip()
-            if not payload:
-                continue
-
-            try:
-                raw = json.loads(payload)
-            except json.JSONDecodeError as exc:
-                raise ProtocolError(f"Invalid JSON in SSE data: {exc}") from exc
-
-            if unwrap_jsonrpc and isinstance(raw, dict):
-                if "error" in raw:
-                    err = raw["error"]
-                    raise ProtocolError(f"JSON-RPC error {err.get('code')}: {err.get('message')}")
-                raw = raw.get("result", raw)
-
-            event = _deserialize_event(raw, event_id=current_event_id)
-            current_event_id = None
-            yield event
+        # Flush remaining data (stream may end without trailing empty line)
+        if data_lines:
+            payload = "\n".join(data_lines)
+            if payload:
+                yield _deserialize_event(
+                    _parse_json_payload(payload, unwrap_jsonrpc),
+                    event_id=current_event_id,
+                )
     except httpx.ReadError as exc:
         raise ProtocolError(f"SSE stream read error: {exc}") from exc
 

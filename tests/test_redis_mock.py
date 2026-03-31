@@ -604,13 +604,13 @@ class TestLazyImports:
 class TestRedisTaskLockFactory:
     """Test the convenience lock factory."""
 
-    async def test_returns_callable(self):
+    def test_returns_callable(self):
         from a2akit.broker.redis import redis_task_lock_factory
 
         mock_redis = MagicMock()
         mock_redis.lock.return_value = "lock-obj"
 
         factory = redis_task_lock_factory(mock_redis, timeout=120)
-        result = await factory("task-123")
+        result = factory("task-123")
         mock_redis.lock.assert_called_once_with("a2akit:tasklock:task-123", timeout=120)
         assert result == "lock-obj"

@@ -229,7 +229,12 @@ def build_a2a_router() -> APIRouter:
         for mw in middlewares:
             await mw.before_dispatch(envelope, request)
 
-        result = await tm.send_message(envelope.params, request_context=envelope.context)
+        try:
+            result = await tm.send_message(envelope.params, request_context=envelope.context)
+        except Exception:
+            for mw in reversed(middlewares):
+                await mw.after_dispatch(envelope)
+            raise
 
         for mw in reversed(middlewares):
             await mw.after_dispatch(envelope, result)

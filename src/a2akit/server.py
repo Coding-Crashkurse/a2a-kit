@@ -198,10 +198,20 @@ class A2AServer:
             return InMemoryStorage()
         if isinstance(self._storage_spec, str):
             if self._storage_spec.startswith("postgresql"):
+                if "+asyncpg" not in self._storage_spec:
+                    raise ValueError(
+                        f"PostgreSQL URL must use the asyncpg driver: "
+                        f"'postgresql+asyncpg://...' (got {self._storage_spec!r})"
+                    )
                 from a2akit.storage.postgres import PostgreSQLStorage
 
                 return PostgreSQLStorage(self._storage_spec)
             if self._storage_spec.startswith("sqlite"):
+                if "+aiosqlite" not in self._storage_spec:
+                    raise ValueError(
+                        f"SQLite URL must use the aiosqlite driver: "
+                        f"'sqlite+aiosqlite:///...' (got {self._storage_spec!r})"
+                    )
                 from a2akit.storage.sqlite import SQLiteStorage
 
                 return SQLiteStorage(self._storage_spec)
@@ -434,6 +444,16 @@ class A2AServer:
 
 def _register_exception_handlers(app: FastAPI) -> None:
     """Register JSON-RPC style exception handlers for A2A storage errors."""
+
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(_req: Request, exc: RequestValidationError) -> JSONResponse:
+        """Map Pydantic validation errors to A2A error format (Spec §5.4)."""
+        return JSONResponse(
+            status_code=400,
+            content={"code": -32600, "message": "Invalid request parameters"},
+        )
 
     @app.exception_handler(HTTPException)
     async def handle_http_exception(_req: Request, exc: HTTPException) -> JSONResponse:

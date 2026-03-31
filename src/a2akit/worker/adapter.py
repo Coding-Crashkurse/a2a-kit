@@ -293,13 +293,16 @@ class WorkerAdapter:
                         if span:
                             span.add_event(EVENT_CANCEL_REQUESTED)
                 except anyio.get_cancelled_exc_class():
-                    if span:
-                        span.add_event(EVENT_CANCEL_REQUESTED)
-                    try:
-                        await ctx._flush_artifacts()
-                    except Exception:
-                        logger.warning("flush_artifacts failed during cancel for %s", task_id)
-                    await self._mark_canceled(self._storage, self._emitter, task_id, context_id)
+                    with anyio.CancelScope(shield=True):
+                        if span:
+                            span.add_event(EVENT_CANCEL_REQUESTED)
+                        try:
+                            await ctx._flush_artifacts()
+                        except Exception:
+                            logger.warning("flush_artifacts failed during cancel for %s", task_id)
+                        await self._mark_canceled(
+                            self._storage, self._emitter, task_id, context_id
+                        )
                 except TaskTerminalStateError:
                     logger.info("Task %s reached terminal state during processing", task_id)
                 except Exception as exc:
@@ -325,8 +328,9 @@ class WorkerAdapter:
 
                         span.set_status(StatusCode.OK)
             finally:
-                await self._event_bus.cleanup(task_id)
-                await self._cancel_registry.cleanup(task_id)
+                with anyio.CancelScope(shield=True):
+                    await self._event_bus.cleanup(task_id)
+                    await self._cancel_registry.cleanup(task_id)
 
     @staticmethod
     async def _mark_canceled(
@@ -342,7 +346,11 @@ class WorkerAdapter:
     async def _mark_failed(
         emitter: EventEmitter, storage: Storage, task_id: str, context_id: str | None, reason: str
     ) -> None:
-        """Persist failed state (with reason) and emit a final status event."""
+        """Persist failed state (with reason) and emit a final status event.
+
+        On ``ConcurrencyError``, re-loads once and retries if the task is
+        still non-terminal — mirrors ``cancel_task_in_storage`` semantics.
+        """
         error_message = Message(
             role=Role.agent,
             parts=[Part(TextPart(text=reason))],
@@ -359,8 +367,31 @@ class WorkerAdapter:
                 messages=[error_message],
                 expected_version=version,
             )
-        except (ConcurrencyError, TaskTerminalStateError):
+        except TaskTerminalStateError:
             return
+        except ConcurrencyError as exc:
+            # Another writer changed the task — retry once if still non-terminal.
+            task = await storage.load_task(task_id)
+            if task is None or task.status.state in TERMINAL_STATES:
+                return
+            version = (
+                exc.current_version
+                if exc.current_version is not None
+                else await storage.get_version(task_id)
+            )
+            try:
+                await emitter.update_task(
+                    task_id,
+                    state=TaskState.failed,
+                    status_message=error_message,
+                    messages=[error_message],
+                    expected_version=version,
+                )
+            except (ConcurrencyError, TaskTerminalStateError):
+                logger.warning(
+                    "mark_failed retry failed for task %s, task may have been modified", task_id
+                )
+                return
         status = TaskStatus(
             state=TaskState.failed,
             timestamp=datetime.now(UTC).isoformat(),

@@ -236,13 +236,13 @@ class RedisStorage(Storage[ContextT]):
         include_artifacts: bool = True,
     ) -> Task:
         """Convert a Redis hash dict to a Task object."""
-        history = self._deserialize_messages(data.get("history", "[]"))
+        history = self._deserialize_messages(data.get("history") or "[]")
         if history_length is not None:
             history = history[-history_length:] if history_length > 0 else []
 
         artifacts_list: list[Artifact] | None = None
         if include_artifacts:
-            raw_artifacts = data.get("artifacts", "[]")
+            raw_artifacts = data.get("artifacts") or "[]"
             artifacts_list = self._deserialize_artifacts(raw_artifacts)
 
         metadata_raw = json.loads(data["metadata_json"]) if data.get("metadata_json") else None
@@ -363,12 +363,12 @@ class RedisStorage(Storage[ContextT]):
         values: dict[str, str] = {}
 
         if messages:
-            existing_history = self._deserialize_messages(decoded.get("history", "[]"))
+            existing_history = self._deserialize_messages(decoded.get("history") or "[]")
             existing_history.extend(messages)
             values["history"] = self._serialize_messages(existing_history)
 
         if artifacts:
-            existing_artifacts = self._deserialize_artifacts(decoded.get("artifacts", "[]"))
+            existing_artifacts = self._deserialize_artifacts(decoded.get("artifacts") or "[]")
             for aw in artifacts:
                 existing_artifacts = self._apply_artifact(
                     existing_artifacts, aw.artifact, append=aw.append
@@ -398,6 +398,7 @@ class RedisStorage(Storage[ContextT]):
         elif status_message is not None:
             # Update status message without a state transition (e.g. progress text)
             values["status_message"] = self._serialize_message(status_message) or ""
+            values["status_timestamp"] = datetime.now(UTC).isoformat()
 
         try:
             if self._update_script is None:

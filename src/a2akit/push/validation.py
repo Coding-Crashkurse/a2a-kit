@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
-import socket
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return any(ip in blocked for blocked in _BLOCKED_RANGES)
 
 
-def validate_webhook_url(
+async def validate_webhook_url(
     url: str,
     *,
     allow_http: bool = False,
@@ -73,10 +73,12 @@ def validate_webhook_url(
     except ValueError:
         pass  # Not an IP literal — resolve via DNS below
 
-    # DNS resolution to prevent SSRF via hostname → private IP
+    # Async DNS resolution to prevent SSRF via hostname → private IP.
+    # Uses the event-loop's getaddrinfo to avoid blocking the loop.
+    loop = asyncio.get_running_loop()
     try:
-        addrinfo = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
+        addrinfo = await loop.getaddrinfo(hostname, None, proto=0)
+    except OSError:
         logger.warning("DNS resolution failed for webhook host %r", hostname)
         return False
 

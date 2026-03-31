@@ -56,8 +56,9 @@ async def cancel_task_in_storage(
     if task.status.state in TERMINAL_STATES:
         return
 
-    # Prefer the task's authoritative context_id over the caller-supplied
-    # value, which may be None when the cancellation path doesn't have it.
+    # Use the caller-supplied context_id if available, otherwise fall back
+    # to the task's context_id (the caller may pass None when the
+    # cancellation path doesn't have it).
     resolved_ctx = context_id or task.context_id
 
     cancel_message = Message(
