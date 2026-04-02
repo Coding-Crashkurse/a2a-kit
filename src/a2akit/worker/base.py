@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from a2a.types import (
     Artifact,
     DataPart,
@@ -835,6 +836,12 @@ class TaskContextImpl(TaskContext):
         self._pending_artifacts = []
         try:
             await self._versioned_update(self.task_id, artifacts=batch)
+        except ConcurrencyError:
+            # Intermediate flush lost to concurrent modification — re-buffer.
+            # Artifacts will be written with the next flush or terminal transition.
+            self._pending_artifacts = batch + self._pending_artifacts
+            logger.warning("Artifact flush skipped (concurrent modification) for %s", self.task_id)
+            return  # Don't update _last_flush — retry sooner
         except Exception:
             self._pending_artifacts = batch + self._pending_artifacts
             raise
@@ -850,6 +857,12 @@ class TaskContextImpl(TaskContext):
         pre_events: list[Any] | None = None,
     ) -> None:
         """Unified terminal transition: drain pending → persist → emit → end turn."""
+        if self._turn_ended:
+            raise RuntimeError(
+                f"Cannot transition to {state.value}: turn already ended. "
+                "Only one lifecycle method (complete/fail/reject/respond/"
+                "request_input/request_auth/reply_directly) may be called per turn."
+            )
         pending = self._pending_artifacts
         self._pending_artifacts = []
         all_artifacts = [*pending, *(artifacts or [])]
@@ -869,11 +882,14 @@ class TaskContextImpl(TaskContext):
             self._pending_artifacts = pending + self._pending_artifacts
             raise
 
-        for evt in pre_events or []:
-            await self._emitter.send_event(self.task_id, evt)
+        # Shield post-write SSE emission from cancellation — the DB write
+        # succeeded, so the final event MUST reach subscribers.
+        with anyio.CancelScope(shield=True):
+            for evt in pre_events or []:
+                await self._emitter.send_event(self.task_id, evt)
 
-        await self._emit_status(state, message=message)
-        self._turn_ended = True
+            await self._emit_status(state, message=message)
+            self._turn_ended = True
 
     @property
     def request_context(self) -> dict[str, Any]:
@@ -1058,6 +1074,14 @@ class TaskContextImpl(TaskContext):
                     status_message=status_msg,
                     artifacts=pending or None,
                 )
+            except ConcurrencyError:
+                # Status-only write lost to concurrent modification — re-buffer
+                # artifacts and continue. Don't kill the task for a progress update.
+                self._pending_artifacts = pending + self._pending_artifacts
+                logger.warning(
+                    "Status write skipped (concurrent modification) for %s", self.task_id
+                )
+                return  # Don't update _last_flush — retry sooner
             except Exception:
                 self._pending_artifacts = pending + self._pending_artifacts
                 raise

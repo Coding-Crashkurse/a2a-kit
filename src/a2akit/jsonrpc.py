@@ -242,14 +242,19 @@ async def _handle_message_send_stream(
         for mw in middlewares:
             await mw.before_dispatch(envelope, request)
 
-        agen = tm.stream_message(envelope.params, request_context=envelope.context)
-        # Eagerly fetch the first event so that _submit_task errors
-        # (TaskTerminalStateError, ContextMismatchError, etc.) produce
-        # a proper JSON-RPC error response instead of a broken SSE stream.
         try:
-            first_pair = await anext(agen)
+            agen = tm.stream_message(envelope.params, request_context=envelope.context)
+            # Eagerly fetch the first event so that _submit_task errors
+            # (TaskTerminalStateError, ContextMismatchError, etc.) produce
+            # a proper JSON-RPC error response instead of a broken SSE stream.
+            try:
+                first_pair = await anext(agen)
+            except BaseException:
+                await agen.aclose()
+                raise
         except BaseException:
-            await agen.aclose()
+            for mw in reversed(middlewares):
+                await mw.after_dispatch(envelope)
             raise
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)

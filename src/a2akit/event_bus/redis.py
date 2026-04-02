@@ -166,6 +166,7 @@ class RedisEventBus(EventBus):
                 maxlen=self._stream_maxlen,
                 approximate=True,
             )
+            pipe.expire(stream_key, 86400)  # 24h fallback TTL for crash recovery
             pipe.publish(channel, "1")
             results = await pipe.execute()
 
@@ -203,7 +204,14 @@ class RedisEventBus(EventBus):
     ) -> AsyncIterator[tuple[str | None, StreamEvent]]:
         """Replay → gap-fill → live Pub/Sub."""
         stream_key = f"{self._stream_prefix}{task_id}"
-        last_seen_id: str = after_event_id or "0-0"
+
+        if after_event_id is None:
+            # No replay — start from current stream end to avoid
+            # replaying historical events that the initial snapshot covers.
+            last_msgs = await self._r.xrevrange(stream_key, count=1)
+            last_seen_id = last_msgs[0][0].decode() if last_msgs and last_msgs[0] else "0-0"
+        else:
+            last_seen_id = after_event_id
 
         # Phase 1: Replay from stream
         if after_event_id is not None:
@@ -266,6 +274,10 @@ class RedisEventBus(EventBus):
                 continue
 
     async def cleanup(self, task_id: str) -> None:
-        """Delete the replay stream for a completed task."""
+        """Expire the replay stream for a completed task.
+
+        Uses EXPIRE instead of DELETE to give active subscribers time
+        to read the final events via XRANGE after the Pub/Sub wakeup.
+        """
         stream_key = f"{self._stream_prefix}{task_id}"
-        await self._r.delete(stream_key)
+        await self._r.expire(stream_key, 60)

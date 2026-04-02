@@ -77,17 +77,13 @@ async def cancel_task_in_storage(
             messages=[cancel_message],
             expected_version=version,
         )
-    except (ConcurrencyError, TaskTerminalStateError) as exc:
+    except (ConcurrencyError, TaskTerminalStateError):
         # Another writer changed the task between our load and write.
         # Re-load and retry once if the task is still non-terminal.
         task = await storage.load_task(task_id)
         if task is None or task.status.state in TERMINAL_STATES:
             return
-        version = (
-            exc.current_version
-            if isinstance(exc, ConcurrencyError) and exc.current_version is not None
-            else await storage.get_version(task_id)
-        )
+        version = await storage.get_version(task_id)
         try:
             await emitter.update_task(
                 task_id,

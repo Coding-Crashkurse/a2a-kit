@@ -118,6 +118,32 @@ class WorkerAdapter:
         retry tracking get up to ``max_retries`` attempts with
         exponential back-off.
         """
+        # Pre-check: poison pills already in DLQ — just mark failed, don't dispatch
+        if handle.attempt > self._max_retries:
+            logger.error(
+                "Skipping dispatch for poison pill (attempt %d/%d)",
+                handle.attempt,
+                self._max_retries,
+            )
+            try:
+                await handle.ack()
+                op = handle.operation
+                params = getattr(op, "params", None)
+                msg = getattr(params, "message", None) if params else None
+                task_id = getattr(msg, "task_id", None) if msg else None
+                context_id = getattr(msg, "context_id", None) if msg else None
+                if task_id:
+                    await self._mark_failed(
+                        self._emitter,
+                        self._storage,
+                        task_id,
+                        context_id,
+                        "Task repeatedly crashed worker processes",
+                    )
+            except Exception:
+                logger.exception("Failed to mark poison pill task as failed")
+            return
+
         acked = False
         try:
             await self._dispatch(handle.operation)
@@ -133,10 +159,9 @@ class WorkerAdapter:
                 await handle.nack(delay_seconds=min(handle.attempt * 2, 30))
                 return
 
-            # Max retries reached: ack + mark failed
+            # Max retries reached: mark failed THEN ack (ensures DB write
+            # lands before the message is removed from the queue).
             try:
-                if not acked:
-                    await handle.ack()
                 op = handle.operation
                 params = getattr(op, "params", None)
                 msg = getattr(params, "message", None) if params else None
@@ -150,6 +175,8 @@ class WorkerAdapter:
                         context_id,
                         "Worker failed to process task",
                     )
+                if not acked:
+                    await handle.ack()
             except Exception:
                 logger.exception("Failed to mark task as failed after error")
 
@@ -294,15 +321,26 @@ class WorkerAdapter:
                             span.add_event(EVENT_CANCEL_REQUESTED)
                 except anyio.get_cancelled_exc_class():
                     with anyio.CancelScope(shield=True):
-                        if span:
-                            span.add_event(EVENT_CANCEL_REQUESTED)
-                        try:
-                            await ctx._flush_artifacts()
-                        except Exception:
-                            logger.warning("flush_artifacts failed during cancel for %s", task_id)
-                        await self._mark_canceled(
-                            self._storage, self._emitter, task_id, context_id
-                        )
+                        if cancel_event.is_set():
+                            # User-initiated cancel — mark as canceled
+                            if span:
+                                span.add_event(EVENT_CANCEL_REQUESTED)
+                            try:
+                                await ctx._flush_artifacts()
+                            except Exception:
+                                logger.warning(
+                                    "flush_artifacts failed during cancel for %s", task_id
+                                )
+                            await self._mark_canceled(
+                                self._storage, self._emitter, task_id, context_id
+                            )
+                        else:
+                            # Server shutdown — do NOT mark as canceled.
+                            # Let the broker NACK so another worker picks it up.
+                            logger.info(
+                                "Task %s interrupted by shutdown, will be retried", task_id
+                            )
+                            raise
                 except TaskTerminalStateError:
                     logger.info("Task %s reached terminal state during processing", task_id)
                 except Exception as exc:
@@ -375,16 +413,12 @@ class WorkerAdapter:
             )
         except TaskTerminalStateError:
             return
-        except ConcurrencyError as exc:
+        except ConcurrencyError:
             # Another writer changed the task — retry once if still non-terminal.
             task = await storage.load_task(task_id)
             if task is None or task.status.state in TERMINAL_STATES:
                 return
-            version = (
-                exc.current_version
-                if exc.current_version is not None
-                else await storage.get_version(task_id)
-            )
+            version = await storage.get_version(task_id)
             try:
                 await emitter.update_task(
                     task_id,

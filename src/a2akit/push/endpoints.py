@@ -37,7 +37,17 @@ async def handle_set_config(
     if task is None:
         raise TaskNotFoundError(f"Task {task_id} not found")
 
-    config = PushNotificationConfig.model_validate(config_data)
+    from pydantic import ValidationError
+
+    try:
+        config = PushNotificationConfig.model_validate(config_data)
+    except ValidationError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400,
+            detail={"code": -32602, "message": f"Invalid push config: {exc.error_count()} errors"},
+        ) from exc
     return await push_store.set_config(task_id, config)
 
 

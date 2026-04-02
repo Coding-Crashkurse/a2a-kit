@@ -98,22 +98,32 @@ class RedisCancelScope(CancelScope):
             return
         self._started = True
 
-        # Check if already cancelled
-        cancel_key = f"{self._key_prefix}cancel:{self._task_id}"
-        exists = await self._redis.exists(cancel_key)
-        if exists:
-            self._event.set()
-            return
+        try:
+            # Check if already cancelled
+            cancel_key = f"{self._key_prefix}cancel:{self._task_id}"
+            exists = await self._redis.exists(cancel_key)
+            if exists:
+                self._event.set()
+                return
 
-        # Subscribe to cancel channel
-        channel = f"{self._key_prefix}cancel-ch:{self._task_id}"
-        self._pubsub = self._redis.pubsub()
-        await self._pubsub.subscribe(channel)
+            # Subscribe to cancel channel
+            channel = f"{self._key_prefix}cancel-ch:{self._task_id}"
+            self._pubsub = self._redis.pubsub()
+            await self._pubsub.subscribe(channel)
 
-        # Re-check after subscribing (race window)
-        exists = await self._redis.exists(cancel_key)
-        if exists:
-            self._event.set()
+            # Re-check after subscribing (race window)
+            exists = await self._redis.exists(cancel_key)
+            if exists:
+                self._event.set()
+                await self._cleanup_pubsub()
+                return
+        except Exception:
+            # Redis connection issue — degrade gracefully.
+            # Force-cancel timeout in TaskManager is the safety net.
+            logger.warning(
+                "Failed to subscribe to cancel channel for %s, relying on force-cancel fallback",
+                self._task_id,
+            )
             await self._cleanup_pubsub()
             return
 
@@ -470,17 +480,20 @@ class RedisBroker(Broker):
 
         while not self._shutdown_flag:
             # 1. Claim stale messages from dead consumers
+            claimed_any = False
             async for handle in self._claim_stale_messages():
                 yield handle
+                claimed_any = True
 
             # 2. Read new messages (blocking)
+            # After claims, don't block — loop back immediately for more stale messages.
             try:
                 entries = await self._r.xreadgroup(
                     groupname=self._group_name,
                     consumername=self._consumer_name,
                     streams={self._stream_key: ">"},
                     count=1,
-                    block=self._block_ms,
+                    block=0 if claimed_any else self._block_ms,
                 )
             except aioredis.ConnectionError:
                 logger.warning("Redis connection lost, retrying...")
@@ -526,6 +539,7 @@ class RedisBroker(Broker):
                 self._group_name,
                 self._consumer_name,
                 min_idle_time=self._claim_timeout_ms,
+                count=1,
             )
             # result is (next_start_id, [(msg_id, fields), ...], [deleted_ids])
             claimed_messages = result[1] if len(result) > 1 else []
@@ -559,6 +573,21 @@ class RedisBroker(Broker):
                         )
                         await self._r.xack(self._stream_key, self._group_name, msg_id)
                         await self._r.hdel(self._crash_count_key, mid)
+                        # Yield a handle so the WorkerAdapter can mark
+                        # the task as failed in storage (the broker has
+                        # no access to storage/emitter).
+                        yield RedisOperationHandle(
+                            redis_client=self._r,
+                            stream_key=self._stream_key,
+                            dlq_key=self._dlq_key,
+                            group_name=self._group_name,
+                            msg_id=msg_id,
+                            op=op,
+                            serialized_op=fields[b"op"],
+                            attempt=effective_attempt,
+                            max_retries=self._max_retries,
+                            crash_count_key=self._crash_count_key,
+                        )
                         continue
                     logger.warning(
                         "Claimed stale message %s (attempt %d)", msg_id, effective_attempt

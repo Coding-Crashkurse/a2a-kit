@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from a2a.types import Artifact, Message, Task, TaskState, TaskStatus
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text
+from sqlalchemy import Column, Integer, MetaData, String, Table, Text, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from a2akit.storage.base import (
@@ -356,11 +356,11 @@ class SQLStorageBase(Storage[ContextT]):
             if query.status_timestamp_after:
                 conditions.append(tasks_table.c.status_timestamp > query.status_timestamp_after)
 
-            count_q = tasks_table.select()
+            count_q = select(func.count()).select_from(tasks_table)
             for cond in conditions:
                 count_q = count_q.where(cond)
             count_result = await session.execute(count_q)
-            total_size = len(count_result.fetchall())
+            total_size = count_result.scalar() or 0
 
             data_q = tasks_table.select()
             for cond in conditions:

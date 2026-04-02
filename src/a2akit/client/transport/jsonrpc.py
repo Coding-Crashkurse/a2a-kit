@@ -155,10 +155,11 @@ class JsonRpcTransport(Transport):
         self, task_id: str, *, last_event_id: str | None = None
     ) -> AsyncIterator[StreamEvent]:
         """JSON-RPC tasks/resubscribe (SSE response)."""
-        envelope = self._envelope("tasks/resubscribe", {"id": task_id})
-        headers = self._headers()
+        params: dict[str, Any] = {"id": task_id}
         if last_event_id:
-            headers["Last-Event-ID"] = last_event_id
+            params["lastEventId"] = last_event_id
+        envelope = self._envelope("tasks/resubscribe", params)
+        headers = self._headers()
         async with self._http.stream(
             "POST",
             self._url,

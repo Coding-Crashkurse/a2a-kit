@@ -124,6 +124,7 @@ class A2AClient:
         candidates = self._build_transport_candidates(self._agent_card)
 
         errors: list[tuple[str, str, Exception]] = []
+        transport: Transport | None = None
         for url, proto in candidates:
             try:
                 transport = self._create_transport(proto, url)
@@ -134,7 +135,8 @@ class A2AClient:
             except Exception:
                 # Health check might not exist or might fail for other reasons;
                 # accept the transport anyway (backwards compat).
-                pass
+                if transport is None:
+                    continue
 
             self._transport = transport
             self._active_protocol = proto
@@ -527,8 +529,8 @@ class A2AClient:
         }
         if task_id is not None:
             msg_kwargs["task_id"] = task_id
-        if context_id is not None:
-            msg_kwargs["context_id"] = context_id
+        # Always set context_id so retries use the same idempotency scope
+        msg_kwargs["context_id"] = context_id or str(uuid.uuid4())
         if metadata is not None:
             msg_kwargs["metadata"] = metadata
 

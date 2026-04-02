@@ -183,11 +183,16 @@ async def _stream_setup(
     for mw in middlewares:
         await mw.before_dispatch(envelope, request)
 
-    agen = tm.stream_message(envelope.params, request_context=envelope.context)
     try:
-        first_pair = await anext(agen)
+        agen = tm.stream_message(envelope.params, request_context=envelope.context)
+        try:
+            first_pair = await anext(agen)
+        except BaseException:
+            await agen.aclose()
+            raise
     except BaseException:
-        await agen.aclose()
+        for mw in reversed(middlewares):
+            await mw.after_dispatch(envelope)
         raise
     return first_pair, agen, middlewares, envelope
 
@@ -269,7 +274,8 @@ def build_a2a_router() -> APIRouter:
         first_pair, agen, middlewares, envelope = setup
         try:
             eid, first_event = first_pair
-            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=eid)
+            if not isinstance(first_event, DirectReply):
+                yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=eid)
             async for eid, ev in agen:
                 if isinstance(ev, DirectReply):
                     continue

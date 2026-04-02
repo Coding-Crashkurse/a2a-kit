@@ -70,7 +70,7 @@ class InMemoryStorage(Storage[ContextT]):
         """Return filtered and paginated tasks."""
         all_tasks = sorted(
             self.tasks.values(),
-            key=lambda t: t.status.timestamp or "",
+            key=lambda t: (t.status.timestamp or "", t.id),
             reverse=True,
         )
 

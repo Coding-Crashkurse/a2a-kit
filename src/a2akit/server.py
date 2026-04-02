@@ -66,7 +66,10 @@ class ContentTypeValidationMiddleware(BaseHTTPMiddleware):
     _EXEMPT_METHODS: frozenset[str] = frozenset({"GET", "DELETE", "OPTIONS", "HEAD"})
 
     async def dispatch(self, request: Request, call_next: Any) -> Response:
-        has_body = int(request.headers.get("content-length", "0")) > 0
+        has_body = (
+            int(request.headers.get("content-length", "0")) > 0
+            or "transfer-encoding" in request.headers
+        )
         if (
             request.method not in self._EXEMPT_METHODS
             and request.url.path not in self._EXEMPT_PATHS

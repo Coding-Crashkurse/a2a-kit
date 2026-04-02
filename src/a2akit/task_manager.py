@@ -13,6 +13,7 @@ from a2a.types import (
     FilePart,
     Message,
     MessageSendParams,
+    Part,
     Role,
     Task,
     TaskState,
@@ -25,6 +26,7 @@ from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
 from a2akit.schema import DIRECT_REPLY_KEY, DirectReply, StreamEvent
 from a2akit.storage.base import (
     TERMINAL_STATES,
+    ConcurrencyError,
     ContentTypeNotSupportedError,
     ContextMismatchError,
     ListTasksQuery,
@@ -119,8 +121,22 @@ class TaskManager:
         except Exception:
             logger.error("Broker enqueue failed for task %s, marking as failed", task_id)
             try:
-                await self.storage.update_task(task_id, state=TaskState.failed)
-                # Publish final event so SSE/blocking subscribers see the failure
+                # Load task first to get context_id for the error message
+                task = await self.storage.load_task(task_id)
+                error_msg = Message(
+                    role=Role.agent,
+                    parts=[Part(TextPart(text="Failed to enqueue task"))],
+                    message_id=str(uuid.uuid4()),
+                    task_id=task_id,
+                    context_id=task.context_id if task else None,
+                )
+                await self.storage.update_task(
+                    task_id,
+                    state=TaskState.failed,
+                    status_message=error_msg,
+                    messages=[error_msg],
+                )
+                # Re-load to get updated status for the SSE event
                 task = await self.storage.load_task(task_id)
                 if task:
                     await self.event_bus.publish(
@@ -171,12 +187,12 @@ class TaskManager:
         """
         self._validate_input_modes(message)
         if not message.task_id:
-            return (
-                await self.storage.create_task(
-                    context_id, message, idempotency_key=message.message_id
-                ),
-                True,
+            task = await self.storage.create_task(
+                context_id, message, idempotency_key=message.message_id
             )
+            # Idempotent duplicate: create_task returns the existing task.
+            # Only enqueue if this is a genuinely new submission.
+            return task, task.status.state == TaskState.submitted
 
         task = await self._load_and_validate(message)
         # Idempotency: skip if this message was already appended (client retry).
@@ -191,12 +207,23 @@ class TaskManager:
         # Pass the current version for OCC — prevents two concurrent
         # follow-ups from silently overwriting each other's history.
         version = await self.storage.get_version(task.id)
-        await self.storage.update_task(
-            task.id,
-            state=new_state,
-            messages=[bound_message],
-            expected_version=version,
-        )
+        try:
+            await self.storage.update_task(
+                task.id,
+                state=new_state,
+                messages=[bound_message],
+                expected_version=version,
+            )
+        except ConcurrencyError:
+            # Parallel retry race: check if our twin request already wrote this message
+            reloaded = await self.storage.load_task(task.id)
+            if (
+                reloaded
+                and reloaded.history
+                and any(m.message_id == message.message_id for m in reloaded.history)
+            ):
+                return reloaded, False  # Idempotent duplicate resolved
+            raise
         # Re-load to return the updated Task object.
         updated = await self.storage.load_task(task.id)
         if updated is None:
@@ -265,6 +292,10 @@ class TaskManager:
         context_id = msg.context_id or str(uuid.uuid4())
         task, should_enqueue = await self._submit_task(context_id, msg)
 
+        # Follow-up: use the task's real context_id, not the generated one
+        if not is_new:
+            context_id = task.context_id
+
         # Idempotent duplicate follow-up — return current state, don't re-enqueue
         if not should_enqueue:
             history_len = getattr(getattr(params, "configuration", None), "history_length", None)
@@ -332,13 +363,18 @@ class TaskManager:
         if direct_message is not None:
             return direct_message
 
-        history_len = getattr(getattr(params, "configuration", None), "history_length", None)
-        latest = await self.storage.load_task(task.id, history_length=history_len)
-        if latest is not None:
-            reply = _find_direct_reply(latest)
+        # Check for direct reply on the FULL task (before history trimming)
+        latest_full = await self.storage.load_task(task.id)
+        if latest_full is not None:
+            reply = _find_direct_reply(latest_full)
             if reply is not None:
                 return reply
-        return latest or task
+
+        history_len = getattr(getattr(params, "configuration", None), "history_length", None)
+        if history_len is not None:
+            trimmed = await self.storage.load_task(task.id, history_length=history_len)
+            return trimmed or latest_full or task
+        return latest_full or task
 
     @staticmethod
     def _bind_message(
@@ -373,6 +409,10 @@ class TaskManager:
         context_id = msg.context_id or str(uuid.uuid4())
         task, should_enqueue = await self._submit_task(context_id, msg)
 
+        # Follow-up: use the task's real context_id, not the generated one
+        if not is_new:
+            context_id = task.context_id
+
         # REQ-08: Inline push notification config on message/stream.
         if params.configuration and hasattr(params.configuration, "push_notification_config"):
             pnc = params.configuration.push_notification_config
@@ -392,24 +432,37 @@ class TaskManager:
 
         yield (None, task)
 
-        if not should_enqueue:
-            return  # Idempotent duplicate — end stream after snapshot
+        # Terminal tasks have no further events — end stream immediately.
+        if not should_enqueue and task.status.state in TERMINAL_STATES:
+            return
 
-        params = self._bind_message(params, context_id, task.id)
+        if should_enqueue:
+            params = self._bind_message(params, context_id, task.id)
 
         # Subscribe BEFORE starting broker — prevents race condition
         # where events published between run_task and subscribe are lost.
+        # Idempotent duplicates still subscribe (for stream reconnect)
+        # but skip the broker enqueue.
         async with self.event_bus.subscribe(task.id) as sub:
-            self._track_background(
-                self._enqueue_or_fail(
-                    task.id,
-                    self.broker.run_task(
-                        params,
-                        is_new_task=is_new,
-                        request_context=request_context,
-                    ),
+            # Duplicate: task may have completed between _submit_task and subscribe.
+            # Re-check inside the subscription to avoid hanging on a dead stream.
+            if not should_enqueue:
+                fresh = await self.storage.load_task(task.id)
+                if fresh and fresh.status.state in TERMINAL_STATES:
+                    yield (None, fresh)
+                    return
+
+            if should_enqueue:
+                self._track_background(
+                    self._enqueue_or_fail(
+                        task.id,
+                        self.broker.run_task(
+                            params,
+                            is_new_task=is_new,
+                            request_context=request_context,
+                        ),
+                    )
                 )
-            )
 
             async for event_id, ev in sub:
                 yield (event_id, ev)
@@ -426,16 +479,26 @@ class TaskManager:
         deliver events published after that ID.
         Raises ``UnsupportedOperationError`` if the task is in a terminal state.
         """
-        task = await self.storage.load_task(task_id)
-        if task is None:
-            raise TaskNotFoundError(f"Task {task_id} not found")
-        if task.status.state in TERMINAL_STATES:
-            raise UnsupportedOperationError("Task is in a terminal state; cannot subscribe")
-
-        # Subscribe BEFORE yielding — prevents event loss between
-        # load_task and subscribe.
+        # Subscribe BEFORE loading — guarantees no events are missed
+        # between the DB read and the subscription setup.
         async with self.event_bus.subscribe(task_id, after_event_id=after_event_id) as sub:
-            yield (None, task)
+            task = await self.storage.load_task(task_id)
+            if task is None:
+                raise TaskNotFoundError(f"Task {task_id} not found")
+            if task.status.state in TERMINAL_STATES and after_event_id is None:
+                raise UnsupportedOperationError("Task is in a terminal state; cannot subscribe")
+
+            # On reconnect (after_event_id set), skip the snapshot to avoid
+            # data duplication — the replay events already cover the gap.
+            if after_event_id is None:
+                yield (None, task)
+
+            # Reconnect to terminal task after cleanup: replay buffer is gone,
+            # no live events will arrive. Yield final snapshot instead of hanging.
+            if after_event_id is not None and task.status.state in TERMINAL_STATES:
+                yield (None, task)
+                return
+
             async for event_id, ev in sub:
                 yield (event_id, ev)
 
@@ -479,6 +542,13 @@ class TaskManager:
             raise TaskNotCancelableError(
                 f"Task {task_id} is in terminal state {task.status.state.value}"
             )
+
+        # Deduplicate: if already being cancelled, just return current state
+        if await self.cancel_registry.is_cancelled(task_id):
+            latest = await self.storage.load_task(task_id)
+            if latest is None:
+                raise TaskNotFoundError(f"Task {task_id} disappeared during cancel")
+            return latest
 
         await self.cancel_registry.request_cancel(task_id)
 
