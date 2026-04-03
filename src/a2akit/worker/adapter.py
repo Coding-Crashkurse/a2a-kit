@@ -156,8 +156,12 @@ class WorkerAdapter:
                 self._max_retries,
             )
             if handle.attempt < self._max_retries:
-                await handle.nack(delay_seconds=min(handle.attempt * 2, 30))
-                return
+                try:
+                    await handle.nack(delay_seconds=min(handle.attempt * 2, 30))
+                except Exception:
+                    logger.warning("nack failed, falling through to mark_failed")
+                else:
+                    return
 
             # Max retries reached: mark failed THEN ack (ensures DB write
             # lands before the message is removed from the queue).
@@ -375,7 +379,11 @@ class WorkerAdapter:
                     # tasks. Non-terminal states (input_required, auth_required)
                     # need the replay buffer for client reconnects, and
                     # shutdown-retried tasks need the cancel key intact.
-                    current = await self._storage.load_task(task_id)
+                    try:
+                        current = await self._storage.load_task(task_id)
+                    except Exception:
+                        logger.warning("Failed to load task %s during cleanup", task_id)
+                        current = None
                     if current and current.status.state in TERMINAL_STATES:
                         try:
                             await self._event_bus.cleanup(task_id)

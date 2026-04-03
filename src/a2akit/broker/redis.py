@@ -327,8 +327,11 @@ class RedisOperationHandle(OperationHandle):
             await self._clear_crash_count()
             return
 
-        if delay_seconds > 0:
-            await asyncio.sleep(delay_seconds)
+        # NOTE: delay_seconds is accepted for API compatibility but NOT
+        # enforced via sleep here — sleeping would hold the caller's
+        # semaphore slot, starving the worker.  The re-added message is
+        # immediately available; Redis XAUTOCLAIM's min_idle_time provides
+        # natural backoff for repeatedly failing messages.
 
         # ACK original, re-add with incremented attempt
         async with self._redis.pipeline(transaction=False) as pipe:

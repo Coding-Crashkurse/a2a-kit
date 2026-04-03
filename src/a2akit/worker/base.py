@@ -842,7 +842,9 @@ class TaskContextImpl(TaskContext):
             self._pending_artifacts = batch + self._pending_artifacts
             logger.warning("Artifact flush skipped (concurrent modification) for %s", self.task_id)
             return  # Don't update _last_flush — retry sooner
-        except Exception:
+        except BaseException:
+            # BaseException catches CancelledError (Python 3.9+) — prevents
+            # artifact loss when cancel fires during a DB write.
             self._pending_artifacts = batch + self._pending_artifacts
             raise
         self._last_flush = time.monotonic()
@@ -878,7 +880,7 @@ class TaskContextImpl(TaskContext):
 
         try:
             await self._versioned_update(self.task_id, **update_kwargs)
-        except Exception:
+        except BaseException:
             self._pending_artifacts = pending + self._pending_artifacts
             raise
 
@@ -1085,7 +1087,7 @@ class TaskContextImpl(TaskContext):
                     "Status write skipped (concurrent modification) for %s", self.task_id
                 )
                 return  # Don't update _last_flush — retry sooner
-            except Exception:
+            except BaseException:
                 self._pending_artifacts = pending + self._pending_artifacts
                 raise
             self._last_flush = time.monotonic()

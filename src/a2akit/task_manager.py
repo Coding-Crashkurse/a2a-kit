@@ -138,7 +138,7 @@ class TaskManager:
                 )
                 # Re-load to get updated status for the SSE event
                 task = await self.storage.load_task(task_id)
-                if task:
+                if task is not None:
                     await self.event_bus.publish(
                         task_id,
                         TaskStatusUpdateEvent(
