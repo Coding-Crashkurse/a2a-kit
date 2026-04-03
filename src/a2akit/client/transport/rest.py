@@ -106,6 +106,11 @@ class RestTransport(Transport):
             if not response.is_success:
                 await response.aread()
                 self._check_error(response)
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                await response.aread()
+                self._check_error(response)
+                return
             async for event in parse_sse_stream(response):
                 yield event
 
@@ -157,6 +162,11 @@ class RestTransport(Transport):
             if not response.is_success:
                 await response.aread()
                 self._check_error(response, task_id=task_id)
+            content_type = response.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                await response.aread()
+                self._check_error(response, task_id=task_id)
+                return
             async for event in parse_sse_stream(response):
                 yield event
 

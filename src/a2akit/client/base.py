@@ -529,8 +529,13 @@ class A2AClient:
         }
         if task_id is not None:
             msg_kwargs["task_id"] = task_id
-        # Always set context_id so retries use the same idempotency scope
-        msg_kwargs["context_id"] = context_id or str(uuid.uuid4())
+        # New tasks: always set context_id so retries use the same idempotency scope.
+        # Follow-ups (task_id set): only set context_id if explicitly provided,
+        # otherwise let the server use the task's existing context_id.
+        if context_id:
+            msg_kwargs["context_id"] = context_id
+        elif task_id is None:
+            msg_kwargs["context_id"] = str(uuid.uuid4())
         if metadata is not None:
             msg_kwargs["metadata"] = metadata
 
