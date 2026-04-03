@@ -102,11 +102,12 @@ async def test_cleanup_deletes_stream(redis_event_bus):
 
     stream_key = f"{redis_event_bus._stream_prefix}{task_id}"
     assert await redis_event_bus._redis.exists(stream_key)
-    assert await redis_event_bus._redis.ttl(stream_key) == -1  # no TTL before cleanup
+    pre_ttl = await redis_event_bus._redis.ttl(stream_key)
+    assert pre_ttl > 60  # publish sets 24h fallback TTL
 
     await redis_event_bus.cleanup(task_id)
     ttl = await redis_event_bus._redis.ttl(stream_key)
-    assert 0 < ttl <= 60  # EXPIRE 60 was set
+    assert 0 < ttl <= 60  # cleanup shortens to 60s
 
 
 async def test_final_event_ends_iterator(redis_event_bus):
