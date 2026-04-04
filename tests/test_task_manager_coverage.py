@@ -488,3 +488,189 @@ async def test_stream_message_with_history_length():
                 async for chunk in resp.aiter_text():
                     raw_text += chunk
             assert len(raw_text) > 0
+
+
+async def test_enqueue_or_fail_marks_task_failed():
+    """_enqueue_or_fail marks the task as failed when the broker coro raises."""
+    storage = InMemoryStorage()
+    async with InMemoryBroker() as broker, InMemoryEventBus() as event_bus:
+        cancel_reg = InMemoryCancelRegistry()
+        tm = TaskManager(
+            broker=broker,
+            storage=storage,
+            event_bus=event_bus,
+            cancel_registry=cancel_reg,
+        )
+        msg = Message(
+            role=Role.user,
+            parts=[Part(TextPart(text="hi"))],
+            message_id=str(uuid.uuid4()),
+        )
+        task = await storage.create_task("ctx-1", msg)
+
+        # Pass a coro that raises to simulate broker failure
+        async def failing_coro():
+            raise RuntimeError("broker down")
+
+        await tm._enqueue_or_fail(task.id, failing_coro())
+
+        loaded = await storage.load_task(task.id)
+        assert loaded is not None
+        assert loaded.status.state == TaskState.failed
+
+
+async def test_enqueue_or_fail_double_failure():
+    """_enqueue_or_fail handles failure even when mark-failed itself fails."""
+    storage = InMemoryStorage()
+    async with InMemoryBroker() as broker, InMemoryEventBus() as event_bus:
+        cancel_reg = InMemoryCancelRegistry()
+        tm = TaskManager(
+            broker=broker,
+            storage=storage,
+            event_bus=event_bus,
+            cancel_registry=cancel_reg,
+        )
+        msg = Message(
+            role=Role.user,
+            parts=[Part(TextPart(text="hi"))],
+            message_id=str(uuid.uuid4()),
+        )
+        task = await storage.create_task("ctx-1", msg)
+
+        # Break storage so the mark-failed path also fails
+        async def broken_update(*args, **kwargs):
+            raise RuntimeError("storage broken too")
+
+        storage.update_task = broken_update
+
+        async def failing_coro():
+            raise RuntimeError("broker down")
+
+        # Should not raise — the double failure is caught and logged
+        await tm._enqueue_or_fail(task.id, failing_coro())
+
+
+async def test_submit_task_concurrency_error_idempotent():
+    """ConcurrencyError in _submit_task resolves idempotently when twin wrote same message."""
+
+    storage = InMemoryStorage()
+    async with InMemoryBroker() as broker, InMemoryEventBus() as event_bus:
+        cancel_reg = InMemoryCancelRegistry()
+        tm = TaskManager(
+            broker=broker,
+            storage=storage,
+            event_bus=event_bus,
+            cancel_registry=cancel_reg,
+        )
+        # Create a task in input_required state
+        msg = Message(
+            role=Role.user,
+            parts=[Part(TextPart(text="hi"))],
+            message_id=str(uuid.uuid4()),
+        )
+        task = await storage.create_task("ctx-1", msg)
+        await storage.update_task(task.id, state=TaskState.input_required)
+
+        follow_up_id = str(uuid.uuid4())
+        follow_msg = Message(
+            role=Role.user,
+            parts=[Part(TextPart(text="follow up"))],
+            message_id=follow_up_id,
+            task_id=task.id,
+        )
+
+        # Simulate a twin write: add the message to history while keeping
+        # state as input_required so _load_and_validate passes.  The twin's
+        # state transition bumps the version, causing a ConcurrencyError
+        # when _submit_task tries its own update.
+        await storage.update_task(task.id, messages=[follow_msg])
+
+        # Now call _submit_task — storage.update_task will raise ConcurrencyError
+        # because the version has changed, but the message is already in history
+        from a2akit.storage.base import ConcurrencyError
+
+        original_update = storage.update_task
+        call_count = 0
+
+        async def raise_once_then_pass(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ConcurrencyError("version conflict")
+            return await original_update(*args, **kwargs)
+
+        storage.update_task = raise_once_then_pass
+
+        _result_task, should_enqueue = await tm._submit_task("ctx-1", follow_msg)
+        # Should resolve as idempotent duplicate
+        assert should_enqueue is False
+
+
+async def test_submit_task_concurrency_error_terminal():
+    """ConcurrencyError in _submit_task raises TaskTerminalStateError if task became terminal."""
+    storage = InMemoryStorage()
+    async with InMemoryBroker() as broker, InMemoryEventBus() as event_bus:
+        cancel_reg = InMemoryCancelRegistry()
+        tm = TaskManager(
+            broker=broker,
+            storage=storage,
+            event_bus=event_bus,
+            cancel_registry=cancel_reg,
+        )
+        msg = Message(
+            role=Role.user,
+            parts=[Part(TextPart(text="hi"))],
+            message_id=str(uuid.uuid4()),
+        )
+        task = await storage.create_task("ctx-1", msg)
+        await storage.update_task(task.id, state=TaskState.input_required)
+
+        follow_msg = Message(
+            role=Role.user,
+            parts=[Part(TextPart(text="follow up"))],
+            message_id=str(uuid.uuid4()),
+            task_id=task.id,
+        )
+
+        from a2akit.storage.base import ConcurrencyError
+
+        original_update = storage.update_task
+
+        async def raise_and_complete(*args, **kwargs):
+            # Simulate another writer completing the task
+            await original_update(task.id, state=TaskState.completed)
+            raise ConcurrencyError("version conflict")
+
+        storage.update_task = raise_and_complete
+
+        with pytest.raises(TaskTerminalStateError):
+            await tm._submit_task("ctx-1", follow_msg)
+
+
+async def test_cancel_dedup_returns_current_state():
+    """cancel_task returns current state when task is already being cancelled."""
+    storage = InMemoryStorage()
+    async with InMemoryBroker() as broker, InMemoryEventBus() as event_bus:
+        cancel_reg = InMemoryCancelRegistry()
+        tm = TaskManager(
+            broker=broker,
+            storage=storage,
+            event_bus=event_bus,
+            cancel_registry=cancel_reg,
+        )
+        msg = Message(
+            role=Role.user,
+            parts=[Part(TextPart(text="hi"))],
+            message_id=str(uuid.uuid4()),
+        )
+        task = await storage.create_task("ctx-1", msg)
+        await storage.update_task(task.id, state=TaskState.working)
+
+        # First cancel
+        await tm.cancel_task(task.id)
+        assert await cancel_reg.is_cancelled(task.id)
+
+        # Second cancel — should dedup and return current state
+        result = await tm.cancel_task(task.id)
+        assert result is not None
+        assert result.id == task.id

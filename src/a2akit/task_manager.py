@@ -112,16 +112,15 @@ class TaskManager:
         """Await *coro* (broker.run_task); on failure mark the task as failed.
 
         Without this wrapper a broker error (e.g. Redis down) would leave
-        the task stuck in ``submitted`` forever.  Uses storage + event_bus
-        directly (not the full emitter) to publish a final SSE event so
-        blocking and streaming subscribers see the failure immediately.
+        the task stuck in ``submitted`` forever.  Routes through the emitter
+        pipeline so that lifecycle hooks, push delivery, and telemetry all
+        fire correctly for broker-failure scenarios.
         """
         try:
             await coro
         except Exception:
             logger.error("Broker enqueue failed for task %s, marking as failed", task_id)
             try:
-                # Load task first to get context_id for the error message
                 task = await self.storage.load_task(task_id)
                 error_msg = Message(
                     role=Role.agent,
@@ -130,16 +129,16 @@ class TaskManager:
                     task_id=task_id,
                     context_id=task.context_id if task else None,
                 )
-                await self.storage.update_task(
+                emitter = self.emitter or DefaultEventEmitter(self.event_bus, self.storage)
+                await emitter.update_task(
                     task_id,
                     state=TaskState.failed,
                     status_message=error_msg,
                     messages=[error_msg],
                 )
-                # Re-load to get updated status for the SSE event
                 task = await self.storage.load_task(task_id)
                 if task is not None:
-                    await self.event_bus.publish(
+                    await emitter.send_event(
                         task_id,
                         TaskStatusUpdateEvent(
                             kind="status-update",
@@ -434,28 +433,22 @@ class TaskManager:
             if trimmed is not None:
                 task = trimmed
 
-        yield (None, task)
-
-        # Terminal tasks have no further events — end stream immediately.
-        if not should_enqueue and task.status.state in TERMINAL_STATES:
-            return
-
         if should_enqueue:
             params = self._bind_message(params, context_id, task.id)
 
-        # Subscribe BEFORE starting broker — prevents race condition
-        # where events published between run_task and subscribe are lost.
-        # Idempotent duplicates still subscribe (for stream reconnect)
-        # but skip the broker enqueue.
+        # Subscribe BEFORE yielding snapshot — prevents event loss between
+        # the DB read and the subscription setup (same pattern as subscribe_task).
         async with self.event_bus.subscribe(task.id) as sub:
-            # Duplicate: task may have completed between _submit_task and subscribe.
-            # Re-check inside the subscription to avoid hanging on a dead stream.
+            # For retries/duplicates, re-load the snapshot inside the
+            # subscription context so it includes the latest state.
             if not should_enqueue:
                 fresh = await self.storage.load_task(task.id)
-                if fresh and fresh.status.state in TERMINAL_STATES:
-                    yield (None, fresh)
-                    return
+                if fresh is not None:
+                    task = fresh
 
+            # Enqueue BEFORE the first yield — if the client disconnects
+            # right after receiving the snapshot, the task is already in the
+            # broker queue and won't become a zombie.
             if should_enqueue:
                 self._track_background(
                     self._enqueue_or_fail(
@@ -467,6 +460,12 @@ class TaskManager:
                         ),
                     )
                 )
+
+            yield (None, task)
+
+            # Terminal tasks have no further events — end stream immediately.
+            if not should_enqueue and task.status.state in TERMINAL_STATES:
+                return
 
             async for event_id, ev in sub:
                 yield (event_id, ev)

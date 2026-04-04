@@ -836,10 +836,15 @@ class TaskContextImpl(TaskContext):
         self._pending_artifacts = []
         try:
             await self._versioned_update(self.task_id, artifacts=batch)
-        except ConcurrencyError:
+        except ConcurrencyError as exc:
             # Intermediate flush lost to concurrent modification — re-buffer.
             # Artifacts will be written with the next flush or terminal transition.
             self._pending_artifacts = batch + self._pending_artifacts
+            # Refresh _version so subsequent writes don't cascade into retries.
+            if exc.current_version is not None:
+                self._version = exc.current_version
+            else:
+                self._version = await self._storage.get_version(self.task_id)
             logger.warning("Artifact flush skipped (concurrent modification) for %s", self.task_id)
             return  # Don't update _last_flush — retry sooner
         except BaseException:
@@ -1079,10 +1084,15 @@ class TaskContextImpl(TaskContext):
                     status_message=status_msg,
                     artifacts=pending or None,
                 )
-            except ConcurrencyError:
+            except ConcurrencyError as exc:
                 # Status-only write lost to concurrent modification — re-buffer
                 # artifacts and continue. Don't kill the task for a progress update.
                 self._pending_artifacts = pending + self._pending_artifacts
+                # Refresh _version so subsequent writes don't cascade into retries.
+                if exc.current_version is not None:
+                    self._version = exc.current_version
+                else:
+                    self._version = await self._storage.get_version(self.task_id)
                 logger.warning(
                     "Status write skipped (concurrent modification) for %s", self.task_id
                 )

@@ -122,10 +122,14 @@ class RedisCancelScope(CancelScope):
                 await self._cleanup_pubsub()
                 return
         except Exception:
-            # Redis connection issue — degrade gracefully.
-            # Force-cancel timeout in TaskManager is the safety net.
+            # Redis connection issue — do NOT set the event, as that would
+            # falsely signal cancellation and kill the worker's task.
+            # Leave the event unset so the worker runs normally.  If a real
+            # cancel request arrives, the force-cancel timeout in
+            # TaskManager._force_cancel_after is the safety net.
             logger.warning(
-                "Failed to subscribe to cancel channel for %s, relying on force-cancel fallback",
+                "Failed to subscribe to cancel channel for %s; "
+                "cancel detection degraded to force-cancel timeout",
                 self._task_id,
             )
             await self._cleanup_pubsub()
@@ -145,13 +149,11 @@ class RedisCancelScope(CancelScope):
         except (asyncio.CancelledError, aioredis.ConnectionError):
             pass
         except Exception:
-            # Unexpected error (e.g. AuthenticationError) — set the event
-            # so that wait() unblocks instead of hanging forever.  The
-            # force-cancel timeout in TaskManager is the ultimate safety
-            # net, but there's no reason to block a semaphore slot until
-            # then.
+            # Unexpected error (e.g. AuthenticationError) — do NOT set the
+            # event, as that would falsely signal cancellation.  The
+            # force-cancel timeout in TaskManager is the safety net for
+            # real cancel requests that can no longer be detected here.
             logger.exception("Cancel listener for %s failed unexpectedly", self._task_id)
-            self._event.set()
         finally:
             await self._cleanup_pubsub()
 
@@ -392,6 +394,7 @@ class RedisBroker(Broker):
         self._pool = pool
         self._redis: aioredis.Redis | None = None
         self._claim_task: asyncio.Task[None] | None = None
+        self._claim_cursor: str = "0-0"
 
     @property
     def _r(self) -> aioredis.Redis:
@@ -559,8 +562,13 @@ class RedisBroker(Broker):
                 self._consumer_name,
                 min_idle_time=self._claim_timeout_ms,
                 count=1,
+                start_id=self._claim_cursor,
             )
             # result is (next_start_id, [(msg_id, fields), ...], [deleted_ids])
+            next_cursor = result[0]
+            self._claim_cursor = (
+                next_cursor.decode() if isinstance(next_cursor, bytes) else str(next_cursor)
+            )
             claimed_messages = result[1] if len(result) > 1 else []
             for msg_id, fields in claimed_messages:
                 if not fields:

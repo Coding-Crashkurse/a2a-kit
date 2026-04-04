@@ -452,6 +452,38 @@ class TestRedisCancelScope:
         # exists should only be called once
         assert mock_redis.exists.await_count == 1
 
+    async def test_start_does_not_false_cancel_on_connection_error(self):
+        """Redis failure during _start must NOT set the cancel event."""
+        from a2akit.broker.redis import RedisCancelScope
+
+        mock_redis = AsyncMock()
+        mock_redis.exists.side_effect = ConnectionError("Redis down")
+        scope = RedisCancelScope(mock_redis, "task-1", "test:")
+        await scope._start()
+        assert scope.is_set() is False, "Connection error must not falsely signal cancellation"
+
+    async def test_listen_does_not_false_cancel_on_unexpected_error(self):
+        """Unexpected error in _listen must NOT set the cancel event."""
+        from a2akit.broker.redis import RedisCancelScope
+
+        mock_redis = AsyncMock()
+        mock_pubsub = AsyncMock()
+
+        async def exploding_listen():
+            raise RuntimeError("unexpected auth error")
+            yield  # pragma: no cover
+
+        mock_pubsub.listen = exploding_listen
+        mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
+        mock_redis.exists.return_value = 0
+
+        scope = RedisCancelScope(mock_redis, "task-1", "test:")
+        scope._pubsub = mock_pubsub
+        scope._started = True
+        scope._listener_task = asyncio.create_task(scope._listen())
+        await scope._listener_task
+        assert scope.is_set() is False, "Unexpected error must not falsely signal cancellation"
+
 
 class TestServerFactoryMethods:
     """Test that A2AServer resolves Redis URLs to Redis backends."""

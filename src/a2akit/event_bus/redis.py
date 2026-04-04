@@ -220,7 +220,11 @@ class RedisEventBus(EventBus):
 
         # Phase 1: Replay from stream
         if after_event_id is not None:
-            entries = await self._r.xrange(stream_key, min=f"({after_event_id}", max="+")
+            try:
+                entries = await self._r.xrange(stream_key, min=f"({after_event_id}", max="+")
+            except aioredis.ResponseError:
+                logger.warning("Invalid after_event_id %r, skipping replay", after_event_id)
+                entries = []
             for entry_id, fields in entries:
                 eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
                 data = fields.get(b"data", b"").decode()

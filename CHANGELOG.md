@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.27] — 2026-04-04
+
+### Fixed
+- **RedisCancelScope false-positive cancellation** — `_start()` and `_listen()`
+  no longer set the cancel event on Redis connection failures or unexpected
+  exceptions. Previously, a transient Redis hiccup would falsely signal
+  cancellation, causing workers to kill perfectly valid tasks. The
+  `force_cancel_timeout` in TaskManager serves as the safety net for real
+  cancel requests that can no longer be detected via Pub/Sub.
+
 ## [0.0.26] — 2026-04-03
 
 ### Fixed

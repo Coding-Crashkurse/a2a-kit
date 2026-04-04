@@ -315,10 +315,15 @@ class WorkerAdapter:
                         tg.start_soon(_cancel_watcher)
                         await self._user_worker.handle(ctx)
                         if not ctx.turn_ended:
-                            await ctx.fail(
-                                "Worker returned without calling a lifecycle method "
-                                "(complete/fail/reject/respond/request_input/request_auth)"
-                            )
+                            if cancel_event.is_set():
+                                # Cooperative cancel: worker checked is_cancelled and returned.
+                                # Don't mark as failed — mark as canceled below.
+                                pass
+                            else:
+                                await ctx.fail(
+                                    "Worker returned without calling a lifecycle method "
+                                    "(complete/fail/reject/respond/request_input/request_auth)"
+                                )
                         tg.cancel_scope.cancel()
 
                     if cancel_event.is_set() and not ctx.turn_ended:
