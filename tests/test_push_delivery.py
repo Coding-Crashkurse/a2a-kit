@@ -84,6 +84,77 @@ async def test_delivery_rejects_invalid_url():
     await service.shutdown()
 
 
+async def test_delivery_strips_internal_metadata():
+    """Webhook payload MUST NOT leak framework-internal metadata keys
+    (``_idempotency_key``, ``_a2akit_direct_reply``, ...). REST/SSE
+    clients get a sanitized Task — webhooks must get the same."""
+    service = WebhookDeliveryService(max_retries=1, allow_http=True, timeout=5.0)
+    await service.startup()
+
+    task = Task(
+        id="task-leak",
+        context_id="ctx-1",
+        kind="task",
+        status=TaskStatus(state=TaskState("working"), timestamp="2026-01-01T00:00:00Z"),
+        metadata={
+            "_idempotency_key": "super-secret-idem",
+            "_a2akit_direct_reply": "msg-123",
+            "_a2akit_just_created": True,
+            "public_label": "visible",
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    async def _fake_post(url, json, headers):
+        captured["json"] = json
+        return httpx.Response(200)
+
+    with patch.object(service._http_client, "post", side_effect=_fake_post):
+        config = _make_config(task_id="task-leak", url="http://example.com/webhook")
+        await service.deliver([config], task)
+        await asyncio.sleep(0.1)
+
+    await service.shutdown()
+
+    payload = captured.get("json")
+    assert isinstance(payload, dict)
+    metadata = payload.get("metadata") or {}
+    # Internal keys (prefix _) must be stripped.
+    assert "_idempotency_key" not in metadata
+    assert "_a2akit_direct_reply" not in metadata
+    assert "_a2akit_just_created" not in metadata
+    # Public keys must survive.
+    assert metadata.get("public_label") == "visible"
+
+
+async def test_delivery_does_not_mutate_original_task():
+    """Sanitization must not mutate the Task the worker is still holding."""
+    service = WebhookDeliveryService(max_retries=1, allow_http=True, timeout=5.0)
+    await service.startup()
+
+    original_metadata = {
+        "_idempotency_key": "keep-me",
+        "public": "ok",
+    }
+    task = Task(
+        id="task-nomutate",
+        context_id="ctx-1",
+        kind="task",
+        status=TaskStatus(state=TaskState("working"), timestamp="2026-01-01T00:00:00Z"),
+        metadata=dict(original_metadata),
+    )
+
+    with patch.object(service._http_client, "post", return_value=httpx.Response(200)):
+        config = _make_config(task_id="task-nomutate", url="http://example.com/webhook")
+        await service.deliver([config], task)
+        await asyncio.sleep(0.1)
+
+    await service.shutdown()
+    # Original still carries the internal key — only the outbound copy was sanitized.
+    assert task.metadata == original_metadata
+
+
 def test_build_headers_basic():
     config = PushNotificationConfig(url="https://example.com")
     headers = _build_headers(config)

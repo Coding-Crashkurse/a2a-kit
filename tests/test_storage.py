@@ -105,6 +105,65 @@ async def test_delete_context(storage):
     assert await storage.load_task(t2.id) is None
 
 
+async def test_delete_task_cascades_to_push_store(storage):
+    """delete_task MUST cascade to PushConfigStore.delete_configs_for_task
+    so push configs don't orphan in the DB."""
+    from a2akit.push.models import PushNotificationConfig
+    from a2akit.push.store import InMemoryPushConfigStore
+
+    push_store = InMemoryPushConfigStore()
+    storage.bind_push_store(push_store)
+
+    task = await storage.create_task("ctx-1", _msg())
+    await push_store.set_config(
+        task.id,
+        PushNotificationConfig(id="cfg-1", url="https://example.com/hook"),
+    )
+    assert len(await push_store.list_configs(task.id)) == 1
+
+    assert await storage.delete_task(task.id) is True
+    assert await push_store.list_configs(task.id) == []
+
+
+async def test_delete_context_cascades_to_push_store(storage):
+    """delete_context MUST cascade push-config cleanup for every deleted task."""
+    from a2akit.push.models import PushNotificationConfig
+    from a2akit.push.store import InMemoryPushConfigStore
+
+    push_store = InMemoryPushConfigStore()
+    storage.bind_push_store(push_store)
+
+    t1 = await storage.create_task("ctx-cascade", _msg("a", "m1"))
+    t2 = await storage.create_task("ctx-cascade", _msg("b", "m2"))
+    await push_store.set_config(
+        t1.id, PushNotificationConfig(id="c1", url="https://example.com/1")
+    )
+    await push_store.set_config(
+        t2.id, PushNotificationConfig(id="c2", url="https://example.com/2")
+    )
+
+    count = await storage.delete_context("ctx-cascade")
+    assert count == 2
+    assert await push_store.list_configs(t1.id) == []
+    assert await push_store.list_configs(t2.id) == []
+
+
+async def test_delete_task_cascade_failure_does_not_break_delete(storage):
+    """If the push store errors during cascade, the primary delete still succeeds."""
+    from a2akit.push.store import InMemoryPushConfigStore
+
+    class BrokenStore(InMemoryPushConfigStore):
+        async def delete_configs_for_task(self, task_id):  # type: ignore[override]
+            raise RuntimeError("push store is down")
+
+    storage.bind_push_store(BrokenStore())
+
+    task = await storage.create_task("ctx-resilient", _msg())
+    # Must not raise despite the cascade failure.
+    assert await storage.delete_task(task.id) is True
+    assert await storage.load_task(task.id) is None
+
+
 async def test_idempotency(storage):
     """Creating two tasks with the same idempotency key and context returns the same task."""
     t1 = await storage.create_task("ctx-1", _msg("a", "m1"), idempotency_key="idem-1")

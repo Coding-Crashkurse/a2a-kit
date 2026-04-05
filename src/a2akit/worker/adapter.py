@@ -90,25 +90,38 @@ class WorkerAdapter:
                 tg.cancel_scope.cancel()
 
     async def _broker_loop(self) -> None:
-        """Continuously receive and dispatch broker operations."""
+        """Continuously receive and dispatch broker operations.
+
+        When a concurrency limit is configured, the semaphore is acquired
+        BEFORE pulling the next message from the broker. This applies
+        backpressure to the queue itself — unacknowledged messages stay in
+        the broker (where other workers can claim them) instead of being
+        pulled into local memory and parked behind a semaphore. Essential
+        for horizontal scaling with Redis Streams (XREADGROUP) and for
+        avoiding OOM with large backlogs.
+        """
         async with anyio.create_task_group() as tg:
             async for handle in self._broker.receive_task_operations():
+                if self._semaphore is not None:
+                    await self._semaphore.acquire()
                 tg.start_soon(self._handle_op, handle)
 
     async def _handle_op(self, handle: OperationHandle) -> None:
         """Execute a single operation with ack/nack handling.
 
         Catches all exceptions so a single failed operation never tears
-        down the entire TaskGroup and its sibling tasks.
+        down the entire TaskGroup and its sibling tasks. The semaphore
+        (if configured) is acquired by ``_broker_loop`` before dispatch
+        and released here in a ``finally`` so the slot is freed even if
+        the handler raises.
         """
         try:
-            if self._semaphore:
-                async with self._semaphore:
-                    await self._handle_op_inner(handle)
-            else:
-                await self._handle_op_inner(handle)
+            await self._handle_op_inner(handle)
         except Exception:
             logger.exception("Unrecoverable error in operation handler")
+        finally:
+            if self._semaphore is not None:
+                self._semaphore.release()
 
     async def _handle_op_inner(self, handle: OperationHandle) -> None:
         """Dispatch, ack on success, nack for retry or mark failed on error.
@@ -301,6 +314,15 @@ class WorkerAdapter:
                     working_version = await emitter.update_task(task_id, state=TaskState.working)
                 except TaskTerminalStateError:
                     return
+                except ConcurrencyError:
+                    # Another writer (force-cancel, follow-up submit) raced us
+                    # on the submitted → working transition. Storage backends
+                    # without transparent retry (SQL) surface this as OCC
+                    # conflict. Don't mark the task as failed — the other
+                    # writer has already advanced the task, cleanup in the
+                    # finally block handles the rest.
+                    logger.info("Task %s working-transition lost to concurrent writer", task_id)
+                    return
 
                 ctx._version = working_version
                 await ctx.send_status()
@@ -327,12 +349,13 @@ class WorkerAdapter:
                         tg.cancel_scope.cancel()
 
                     if cancel_event.is_set() and not ctx.turn_ended:
-                        try:
-                            await ctx._flush_artifacts()
-                        except Exception:
-                            logger.warning("flush_artifacts failed during cancel for %s", task_id)
+                        pending = await self._drain_pending_artifacts(ctx, task_id)
                         await self._mark_canceled(
-                            self._storage, self._emitter, task_id, context_id
+                            self._storage,
+                            self._emitter,
+                            task_id,
+                            context_id,
+                            artifacts=pending,
                         )
                         if span:
                             span.add_event(EVENT_CANCEL_REQUESTED)
@@ -342,14 +365,13 @@ class WorkerAdapter:
                             # User-initiated cancel — mark as canceled
                             if span:
                                 span.add_event(EVENT_CANCEL_REQUESTED)
-                            try:
-                                await ctx._flush_artifacts()
-                            except Exception:
-                                logger.warning(
-                                    "flush_artifacts failed during cancel for %s", task_id
-                                )
+                            pending = await self._drain_pending_artifacts(ctx, task_id)
                             await self._mark_canceled(
-                                self._storage, self._emitter, task_id, context_id
+                                self._storage,
+                                self._emitter,
+                                task_id,
+                                context_id,
+                                artifacts=pending,
                             )
                         else:
                             # Server shutdown — do NOT mark as canceled.
@@ -367,13 +389,15 @@ class WorkerAdapter:
                         from opentelemetry.trace import StatusCode
 
                         span.set_status(StatusCode.ERROR, str(exc))
-                    try:
-                        await ctx._flush_artifacts()
-                    except Exception:
-                        logger.warning(
-                            "flush_artifacts failed during error handling for %s", task_id
-                        )
-                    await self._mark_failed(emitter, self._storage, task_id, context_id, str(exc))
+                    pending = await self._drain_pending_artifacts(ctx, task_id)
+                    await self._mark_failed(
+                        emitter,
+                        self._storage,
+                        task_id,
+                        context_id,
+                        str(exc),
+                        artifacts=pending,
+                    )
                 else:
                     if span:
                         loaded = await self._storage.load_task(task_id)
@@ -412,23 +436,53 @@ class WorkerAdapter:
                         logger.exception("cancel_registry cleanup failed for %s", task_id)
 
     @staticmethod
+    async def _drain_pending_artifacts(ctx: Any, task_id: str) -> list[Any]:
+        """Take all buffered artifacts out of ``ctx`` so they can be
+        included atomically with the terminal state write.
+
+        We deliberately do NOT call ``ctx._flush_artifacts()`` here:
+        flushing writes artifacts in a separate transaction, which is
+        racy against the force-cancel path (the flush may hit
+        ``ConcurrencyError``, re-buffer, and return silently — meaning
+        the subsequent ``_mark_failed``/``_mark_canceled`` would miss
+        them and the artifacts would be lost for polling clients).
+        Instead, we pull them out of the buffer and pass them through
+        to the terminal write so the state change and the artifacts
+        land in a single storage transaction.
+        """
+        pending = ctx._pending_artifacts
+        ctx._pending_artifacts = []
+        return list(pending)
+
+    @staticmethod
     async def _mark_canceled(
         storage: Storage,
         emitter: EventEmitter,
         task_id: str,
         context_id: str | None,
+        *,
+        artifacts: list[Any] | None = None,
     ) -> None:
         """Persist canceled state (with reason) and emit a final status event."""
-        await cancel_task_in_storage(storage, emitter, task_id, context_id)
+        await cancel_task_in_storage(storage, emitter, task_id, context_id, artifacts=artifacts)
 
     @staticmethod
     async def _mark_failed(
-        emitter: EventEmitter, storage: Storage, task_id: str, context_id: str | None, reason: str
+        emitter: EventEmitter,
+        storage: Storage,
+        task_id: str,
+        context_id: str | None,
+        reason: str,
+        *,
+        artifacts: list[Any] | None = None,
     ) -> None:
         """Persist failed state (with reason) and emit a final status event.
 
         On ``ConcurrencyError``, re-loads once and retries if the task is
         still non-terminal — mirrors ``cancel_task_in_storage`` semantics.
+
+        ``artifacts`` are written atomically with the state transition so
+        buffered artifacts from a mid-run failure/cancel are not lost.
         """
         error_message = Message(
             role=Role.agent,
@@ -444,6 +498,7 @@ class WorkerAdapter:
                 state=TaskState.failed,
                 status_message=error_message,
                 messages=[error_message],
+                artifacts=artifacts or None,
                 expected_version=version,
             )
         except TaskTerminalStateError:
@@ -460,6 +515,7 @@ class WorkerAdapter:
                     state=TaskState.failed,
                     status_message=error_message,
                     messages=[error_message],
+                    artifacts=artifacts or None,
                     expected_version=version,
                 )
             except (ConcurrencyError, TaskTerminalStateError):

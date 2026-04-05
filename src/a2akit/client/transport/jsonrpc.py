@@ -108,9 +108,9 @@ class JsonRpcTransport(Transport):
         return Task.model_validate(result)
 
     async def stream_message(self, params: MessageSendParams) -> AsyncIterator[StreamEvent]:
-        """JSON-RPC message/sendStream (SSE response)."""
+        """JSON-RPC message/stream (SSE response)."""
         body = params.model_dump(mode="json", by_alias=True, exclude_none=True)
-        envelope = self._envelope("message/sendStream", body)
+        envelope = self._envelope("message/stream", body)
         async with self._http.stream(
             "POST",
             self._url,
@@ -154,12 +154,16 @@ class JsonRpcTransport(Transport):
     async def subscribe_task(
         self, task_id: str, *, last_event_id: str | None = None
     ) -> AsyncIterator[StreamEvent]:
-        """JSON-RPC tasks/resubscribe (SSE response)."""
-        params: dict[str, Any] = {"id": task_id}
-        if last_event_id:
-            params["lastEventId"] = last_event_id
-        envelope = self._envelope("tasks/resubscribe", params)
+        """JSON-RPC tasks/resubscribe (SSE response).
+
+        Per spec §7.9, ``TaskIdParams`` carries only ``id`` and ``metadata``
+        — the resume point is passed via the standard W3C ``Last-Event-ID``
+        HTTP header, not in the JSON-RPC payload.
+        """
+        envelope = self._envelope("tasks/resubscribe", {"id": task_id})
         headers = self._headers()
+        if last_event_id:
+            headers["Last-Event-ID"] = last_event_id
         async with self._http.stream(
             "POST",
             self._url,

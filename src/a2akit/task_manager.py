@@ -631,7 +631,21 @@ class TaskManager:
                 # Clean up resources that the worker would normally own.
                 # If the worker never dequeued this task, these would leak.
                 # Cleanup is idempotent — safe even if the worker also calls it.
-                await self.event_bus.cleanup(task_id)
-                await self.cancel_registry.cleanup(task_id)
+                # Each operation is isolated so a transient failure in one
+                # (e.g. Redis blip during event_bus.cleanup) does not skip
+                # the other — otherwise the CancelRegistry key + Pub/Sub
+                # listener would leak until the next process restart.
+                try:
+                    await self.event_bus.cleanup(task_id)
+                except Exception:
+                    logger.exception(
+                        "event_bus cleanup failed for %s during force-cancel", task_id
+                    )
+                try:
+                    await self.cancel_registry.cleanup(task_id)
+                except Exception:
+                    logger.exception(
+                        "cancel_registry cleanup failed for %s during force-cancel", task_id
+                    )
         except Exception:
             logger.exception("Force-cancel failed for task %s", task_id)

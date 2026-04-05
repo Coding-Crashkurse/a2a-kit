@@ -26,6 +26,7 @@ from a2akit.storage.base import (
 
 if TYPE_CHECKING:
     from a2akit.event_emitter import EventEmitter
+    from a2akit.storage.base import ArtifactWrite
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ async def cancel_task_in_storage(
     task_id: str,
     context_id: str | None,
     reason: str = "Task was canceled.",
+    *,
+    artifacts: list[ArtifactWrite] | None = None,
 ) -> None:
     """Persist cancel state and broadcast final event.
 
@@ -49,6 +52,9 @@ async def cancel_task_in_storage(
     :class:`ConcurrencyError` is raised (another writer changed the
     task between load and write), re-loads once and retries if the
     task is still non-terminal.
+
+    ``artifacts`` are written atomically with the cancel transition so
+    buffered artifacts from a mid-run cancel are not lost.
     """
     task = await storage.load_task(task_id)
     if task is None:
@@ -75,6 +81,7 @@ async def cancel_task_in_storage(
             state=TaskState.canceled,
             status_message=cancel_message,
             messages=[cancel_message],
+            artifacts=artifacts or None,
             expected_version=version,
         )
     except (ConcurrencyError, TaskTerminalStateError):
@@ -90,6 +97,7 @@ async def cancel_task_in_storage(
                 state=TaskState.canceled,
                 status_message=cancel_message,
                 messages=[cancel_message],
+                artifacts=artifacts or None,
                 expected_version=version,
             )
         except (ConcurrencyError, TaskTerminalStateError):

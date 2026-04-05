@@ -294,6 +294,48 @@ class Storage(ABC, Generic[ContextT]):
         task state.
         """
 
+    # Optional cascade target. Bound by the server wiring after the
+    # PushConfigStore is constructed. Subclass ``delete_task`` /
+    # ``delete_context`` implementations MUST call
+    # ``_cascade_push_delete_for_task`` / ``_cascade_push_delete_for_context``
+    # after a successful deletion so push configs don't orphan in the DB.
+    _push_store: Any = None
+
+    def bind_push_store(self, push_store: Any) -> None:
+        """Bind a PushConfigStore for cascade deletion.
+
+        Called once by the server wiring after both storage and
+        push_store are constructed. A later ``delete_task`` /
+        ``delete_context`` will then cascade-remove any push configs
+        attached to the deleted tasks.
+        """
+        self._push_store = push_store
+
+    async def _cascade_push_delete_for_task(self, task_id: str) -> None:
+        """Remove push configs attached to ``task_id`` if a store is bound.
+
+        Swallows exceptions — cascade failure MUST NOT roll back the
+        primary task deletion, which already succeeded.
+        """
+        store = self._push_store
+        if store is None:
+            return
+        try:
+            await store.delete_configs_for_task(task_id)
+        except Exception:
+            logger.exception("Push-config cascade delete failed for task %s", task_id)
+
+    async def _cascade_push_delete_for_tasks(self, task_ids: list[str]) -> None:
+        """Batch variant of :meth:`_cascade_push_delete_for_task`."""
+        store = self._push_store
+        if store is None or not task_ids:
+            return
+        for tid in task_ids:
+            try:
+                await store.delete_configs_for_task(tid)
+            except Exception:
+                logger.exception("Push-config cascade delete failed for task %s", tid)
+
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task by ID. Returns True if the task existed."""
         raise NotImplementedError

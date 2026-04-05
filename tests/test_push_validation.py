@@ -126,3 +126,29 @@ async def test_ssrf_hostname_resolves_to_private_ip():
 async def test_dns_resolution_failure_rejects():
     """Unresolvable hostnames must be rejected."""
     assert await validate_webhook_url("https://nonexistent.invalid/webhook") is False
+
+
+async def test_unspecified_0_0_0_0_blocked():
+    """0.0.0.0 must be blocked — Linux/macOS silently route it to localhost,
+    which is a classic SSRF bypass vector for hand-maintained deny lists."""
+    assert await validate_webhook_url("https://0.0.0.0/webhook") is False
+
+
+async def test_unspecified_ipv6_blocked():
+    """The IPv6 unspecified address :: is equally unsafe."""
+    assert await validate_webhook_url("https://[::]/webhook") is False
+
+
+async def test_ipv4_mapped_ipv6_private_blocked():
+    """::ffff:127.0.0.1 must NOT smuggle a loopback IPv4 through an IPv6 literal."""
+    assert await validate_webhook_url("https://[::ffff:127.0.0.1]/webhook") is False
+
+
+async def test_shared_address_space_blocked():
+    """100.64.0.0/10 (CGNAT / shared address space) is not globally routable."""
+    assert await validate_webhook_url("https://100.64.0.1/webhook") is False
+
+
+async def test_documentation_range_blocked():
+    """192.0.2.0/24 (TEST-NET-1) is reserved for documentation and not routable."""
+    assert await validate_webhook_url("https://192.0.2.1/webhook") is False

@@ -106,7 +106,7 @@ export async function sendStreamingRequest(
   let url: string, body: string;
   if (jsonRpc) {
     url = agentUrl;
-    body = JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "message/sendStream", params });
+    body = JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "message/stream", params });
   } else {
     url = agentUrl + "/message:stream";
     body = JSON.stringify(params);

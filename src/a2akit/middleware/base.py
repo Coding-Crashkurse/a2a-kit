@@ -19,13 +19,18 @@ class RequestEnvelope:
     ``context`` is transient and discarded after the Worker finishes.
 
     Attributes:
-        params: The A2A protocol payload. Persisted by Storage.
+        params: The A2A protocol payload. Persisted by Storage. May be
+                ``None`` on non-message endpoints (e.g. ``tasks/get``,
+                ``tasks/cancel``) where the framework runs the middleware
+                pipeline purely for cross-cutting concerns like auth.
+                Middleware that depends on ``params`` MUST guard against
+                the ``None`` case.
         context: Framework-internal metadata. Never persisted.
                  Populated by middleware, consumed by the Worker
                  via ``ctx.request_context``.
     """
 
-    params: MessageSendParams
+    params: MessageSendParams | None = None
     context: dict[str, Any] = field(default_factory=dict)
 
 

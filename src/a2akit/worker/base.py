@@ -795,9 +795,15 @@ class TaskContextImpl(TaskContext):
 
         On ``ConcurrencyError`` (version mismatch from a concurrent
         writer), re-loads the task:
-        - If terminal → raises ``TaskTerminalStateError`` so the
-          caller stops processing (e.g. force-cancel won the race).
-        - If non-terminal → retries once with the freshly loaded version.
+        - If the task is terminal AND the write would transition state
+          OR overwrite ``status.message`` → raises ``TaskTerminalStateError``
+          so the caller stops processing (e.g. force-cancel won the race
+          and already wrote the canceled/failed status message — we must
+          not overwrite it with a stale progress update).
+        - Otherwise → retries once with the freshly loaded version.
+          Artifact-only and history-only writes are still valid on
+          terminal tasks (force-cancel drains pending artifacts into
+          the canceled state via this path), so we must not block them.
         """
         try:
             new_version = await self._emitter.update_task(
@@ -806,11 +812,19 @@ class TaskContextImpl(TaskContext):
             self._version = new_version
         except ConcurrencyError as exc:
             task = await self._storage.load_task(task_id)
-            if task is None or task.status.state in TERMINAL_STATES:
+            if task is None:
+                raise TaskTerminalStateError(f"Task {task_id} vanished during update") from exc
+            is_state_transition = kwargs.get("state") is not None
+            overwrites_status_message = kwargs.get("status_message") is not None
+            if task.status.state in TERMINAL_STATES and (
+                is_state_transition or overwrites_status_message
+            ):
                 raise TaskTerminalStateError(
                     f"Task {task_id} reached terminal state during update"
                 ) from exc
-            # Non-terminal version mismatch: retry with fresh version.
+            # Retry with fresh version. For non-state writes on terminal
+            # tasks this still succeeds because storage backends only
+            # guard state transitions, not artifact/status writes.
             fresh_version = exc.current_version or await self._storage.get_version(task_id)
             new_version = await self._emitter.update_task(
                 task_id, expected_version=fresh_version, **kwargs

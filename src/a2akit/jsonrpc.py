@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from a2a.types import MessageSendParams, Task
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from starlette.responses import StreamingResponse
 
@@ -19,7 +19,6 @@ from a2akit.storage import ContextMismatchError, TaskNotAcceptingMessagesError
 from a2akit.storage.base import (
     ContentTypeNotSupportedError,
     InvalidAgentResponseError,
-    ListTasksQuery,
     TaskNotCancelableError,
     TaskNotFoundError,
     TaskTerminalStateError,
@@ -123,13 +122,54 @@ def _get_tm(request: Request) -> TaskManager:
 
 _JSONRPC_DISPATCH: dict[str, Any] = {}
 
+# Methods that run the A2A middleware pipeline themselves inside their
+# handler. The dispatcher MUST NOT double-process these.
+#
+# Two reasons a method lives here:
+#   1. It builds a params-aware envelope (message/send, message/stream).
+#   2. It returns a StreamingResponse and must run ``after_dispatch`` from
+#      inside the SSE generator's ``finally`` — otherwise the dispatcher's
+#      ``finally`` would fire after ``return StreamingResponse(...)`` but
+#      before the first SSE event is produced, ending tracing spans and
+#      detaching OTel context while the stream is still live
+#      (tasks/resubscribe).
+_MIDDLEWARE_SELF_HANDLED_METHODS: frozenset[str] = frozenset(
+    {
+        "message/send",
+        "message/sendStream",
+        "message/stream",
+        "tasks/resubscribe",
+    }
+)
+
+# Methods that are intentionally unauthenticated.
+_MIDDLEWARE_PUBLIC_METHODS: frozenset[str] = frozenset({"health"})
+
+# Streaming methods cannot meaningfully respond to a JSON-RPC Notification
+# (no id ⇒ MUST NOT reply per JSON-RPC 2.0 §4.1). When invoked without an
+# id, the dispatcher returns 204 No Content without starting the stream.
+_STREAMING_METHODS: frozenset[str] = frozenset(
+    {"message/sendStream", "message/stream", "tasks/resubscribe"}
+)
+
 
 def build_jsonrpc_router() -> APIRouter:
     """Build the JSON-RPC 2.0 A2A router."""
     router = APIRouter(dependencies=[Depends(_check_a2a_version)])
 
-    async def _parse_body(request: Request) -> tuple[Any, dict[str, Any]] | JSONResponse:
-        """Parse and validate the JSON-RPC envelope. Returns (req_id, body) or error response."""
+    async def _parse_body(
+        request: Request,
+    ) -> tuple[Any, bool, dict[str, Any]] | JSONResponse | Response:
+        """Parse and validate the JSON-RPC envelope.
+
+        Returns ``(req_id, is_notification, body)`` or an error response.
+
+        Per JSON-RPC 2.0 §4.1 a request that omits the ``id`` member is a
+        Notification and the server MUST NOT reply. ``is_notification`` is
+        ``True`` only when ``id`` was absent from the envelope — an
+        explicit ``"id": null`` is a valid request and still expects a
+        response object with ``"id": null``.
+        """
         try:
             body = await request.json()
         except Exception:
@@ -138,36 +178,87 @@ def build_jsonrpc_router() -> APIRouter:
         if not isinstance(body, dict):
             return _error_response(None, INVALID_REQUEST, "Invalid Request")
 
+        is_notification = "id" not in body
+        req_id = body.get("id")
+
         if body.get("jsonrpc") != "2.0":
+            if is_notification:
+                return Response(status_code=204)
             return _error_response(
-                body.get("id"), INVALID_REQUEST, "Invalid Request: jsonrpc must be '2.0'"
+                req_id, INVALID_REQUEST, "Invalid Request: jsonrpc must be '2.0'"
             )
 
         if not isinstance(body.get("method"), str):
+            if is_notification:
+                return Response(status_code=204)
             return _error_response(
-                body.get("id"), INVALID_REQUEST, "Invalid Request: method must be a string"
+                req_id, INVALID_REQUEST, "Invalid Request: method must be a string"
             )
 
-        return body.get("id"), body
+        return req_id, is_notification, body
 
     @router.post("/")
     async def jsonrpc_endpoint(request: Request) -> Any:
         """Single JSON-RPC 2.0 endpoint."""
         parsed = await _parse_body(request)
-        if isinstance(parsed, JSONResponse):
+        if isinstance(parsed, (JSONResponse, Response)):
             return parsed
 
-        req_id, body = parsed
+        req_id, is_notification, body = parsed
         method = body["method"]
         params = body.get("params") or {}
 
         handler = _JSONRPC_DISPATCH.get(method)
         if handler is None:
+            if is_notification:
+                return Response(status_code=204)
             return _error_response(
                 req_id, METHOD_NOT_FOUND, f"Method not found: {method}", {"method": method}
             )
 
-        return await handler(request, req_id, params)
+        # Streaming method as a notification is meaningless and the server
+        # MUST NOT reply — drop it without touching the worker pipeline.
+        if is_notification and method in _STREAMING_METHODS:
+            return Response(status_code=204)
+
+        # Spec §4.4: authenticate EVERY incoming request. Message methods
+        # build a params-aware envelope in their own handler and run the
+        # middleware pipeline themselves. Every other method (tasks/*,
+        # pushNotificationConfig/*, agent/getAuthenticatedExtendedCard)
+        # runs the pipeline here with an empty envelope so that auth
+        # middlewares fire uniformly across the JSON-RPC surface.
+        if (
+            method not in _MIDDLEWARE_SELF_HANDLED_METHODS
+            and method not in _MIDDLEWARE_PUBLIC_METHODS
+        ):
+            middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
+            if middlewares:
+                envelope = RequestEnvelope()
+                started: list[A2AMiddleware] = []
+                try:
+                    try:
+                        for mw in middlewares:
+                            await mw.before_dispatch(envelope, request)
+                            started.append(mw)
+                    except Exception as exc:
+                        if is_notification:
+                            return Response(status_code=204)
+                        return _map_exception_to_error(req_id, exc)
+                    result = await handler(request, req_id, params)
+                    if is_notification:
+                        return Response(status_code=204)
+                    return result
+                finally:
+                    # Only after_dispatch for middlewares whose before_dispatch
+                    # completed — anything upstream of a failing middleware
+                    # would otherwise leak (OTel span, context token, ...).
+                    for mw in reversed(started):
+                        await mw.after_dispatch(envelope)
+
+        result = await handler(request, req_id, params)
+        if is_notification:
+            return Response(status_code=204)
+        return result
 
     return router
 
@@ -190,17 +281,20 @@ async def _handle_message_send(
     try:
         tm = _get_tm(request)
         envelope = RequestEnvelope(params=send_params)
-        for mw in middlewares:
-            await mw.before_dispatch(envelope, request)
-
+        started: list[A2AMiddleware] = []
         try:
+            for mw in middlewares:
+                await mw.before_dispatch(envelope, request)
+                started.append(mw)
+
+            assert envelope.params is not None  # message endpoints always carry params
             result = await tm.send_message(envelope.params, request_context=envelope.context)
         except Exception:
-            for mw in reversed(middlewares):
+            for mw in reversed(started):
                 await mw.after_dispatch(envelope)
             raise
 
-        for mw in reversed(middlewares):
+        for mw in reversed(started):
             await mw.after_dispatch(envelope, result)
 
         return _result_response(req_id, _serialize(result))
@@ -221,28 +315,31 @@ def _check_streaming(request: Request, req_id: Any) -> JSONResponse | None:
 async def _handle_message_send_stream(
     request: Request, req_id: Any, params: dict[str, Any]
 ) -> Any:
-    """Handle message/sendStream — returns SSE."""
+    """Handle message/stream (alias: message/sendStream) — returns SSE."""
     err = _check_streaming(request, req_id)
     if err is not None:
         return err
     try:
         send_params = MessageSendParams.model_validate(params)
     except (ValidationError, Exception):
-        return _error_response(req_id, INVALID_PARAMS, "Invalid params for message/sendStream")
+        return _error_response(req_id, INVALID_PARAMS, "Invalid params for message/stream")
 
     msg = send_params.message
     if not msg.message_id or not msg.message_id.strip():
         return _error_response(req_id, INVALID_PARAMS, "messageId is required")
 
     middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
+    started: list[A2AMiddleware] = []
 
     try:
         tm = _get_tm(request)
         envelope = RequestEnvelope(params=send_params)
-        for mw in middlewares:
-            await mw.before_dispatch(envelope, request)
-
         try:
+            for mw in middlewares:
+                await mw.before_dispatch(envelope, request)
+                started.append(mw)
+
+            assert envelope.params is not None  # message endpoints always carry params
             agen = tm.stream_message(envelope.params, request_context=envelope.context)
             # Eagerly fetch the first event so that _submit_task errors
             # (TaskTerminalStateError, ContextMismatchError, etc.) produce
@@ -253,7 +350,8 @@ async def _handle_message_send_stream(
                 await agen.aclose()
                 raise
         except BaseException:
-            for mw in reversed(middlewares):
+            # Only roll back middlewares whose before_dispatch completed.
+            for mw in reversed(started):
                 await mw.after_dispatch(envelope)
             raise
     except Exception as exc:
@@ -276,7 +374,9 @@ async def _handle_message_send_stream(
             try:
                 await agen.aclose()
             finally:
-                for mw in reversed(middlewares):
+                # All middlewares in ``started`` successfully completed
+                # before_dispatch (otherwise we would have returned above).
+                for mw in reversed(started):
                     await mw.after_dispatch(envelope)
 
     return StreamingResponse(_sse_generator(), media_type="text/event-stream")
@@ -300,35 +400,6 @@ async def _handle_tasks_get(request: Request, req_id: Any, params: dict[str, Any
         return _map_exception_to_error(req_id, exc)
 
 
-async def _handle_tasks_list(
-    request: Request, req_id: Any, params: dict[str, Any]
-) -> JSONResponse:
-    """Handle tasks/list."""
-    try:
-        query = ListTasksQuery(
-            context_id=params.get("contextId"),
-            status=params.get("status"),
-            page_size=params.get("pageSize", 50),
-            page_token=params.get("pageToken"),
-            history_length=params.get("historyLength"),
-            status_timestamp_after=params.get("statusTimestampAfter"),
-            include_artifacts=params.get("includeArtifacts", False),
-        )
-    except (ValidationError, Exception):
-        return _error_response(req_id, INVALID_PARAMS, "Invalid params for tasks/list")
-
-    try:
-        tm = _get_tm(request)
-        result = await tm.list_tasks(query)
-        result.tasks = [_sanitize_task_for_client(t) for t in result.tasks]
-        return _result_response(
-            req_id,
-            result.model_dump(mode="json", by_alias=True, exclude_none=True),
-        )
-    except Exception as exc:
-        return _map_exception_to_error(req_id, exc)
-
-
 async def _handle_tasks_cancel(
     request: Request, req_id: Any, params: dict[str, Any]
 ) -> JSONResponse:
@@ -346,7 +417,21 @@ async def _handle_tasks_cancel(
 
 
 async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[str, Any]) -> Any:
-    """Handle tasks/resubscribe — returns SSE."""
+    """Handle tasks/resubscribe — returns SSE.
+
+    The ``TaskIdParams`` schema (spec §7.4.1, referenced by §7.9) contains
+    only ``id`` and ``metadata``. The resume point for an interrupted SSE
+    stream is carried over HTTP via the standard ``Last-Event-ID`` header
+    (W3C EventSource), not in the JSON-RPC payload.
+
+    Listed in ``_MIDDLEWARE_SELF_HANDLED_METHODS`` so the dispatcher does
+    not wrap it in its own middleware ``try/finally``. We run the pipeline
+    here instead — ``before_dispatch`` up front, ``after_dispatch`` from
+    inside the SSE generator's ``finally`` — so that tracing spans and
+    OTel context stay attached for the lifetime of the actual stream
+    rather than being torn down the moment the handler returns a
+    ``StreamingResponse`` to Starlette.
+    """
     err = _check_streaming(request, req_id)
     if err is not None:
         return err
@@ -354,15 +439,29 @@ async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[
     if not task_id:
         return _error_response(req_id, INVALID_PARAMS, "Missing 'id' in params")
 
-    after_event_id = params.get("lastEventId")
+    after_event_id = request.headers.get("Last-Event-ID")
+
+    middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
+    envelope = RequestEnvelope()
+    started: list[A2AMiddleware] = []
 
     try:
-        tm = _get_tm(request)
-        agen = tm.subscribe_task(task_id, after_event_id=after_event_id)
         try:
-            first_pair = await anext(agen)
+            for mw in middlewares:
+                await mw.before_dispatch(envelope, request)
+                started.append(mw)
+
+            tm = _get_tm(request)
+            agen = tm.subscribe_task(task_id, after_event_id=after_event_id)
+            try:
+                first_pair = await anext(agen)
+            except BaseException:
+                await agen.aclose()
+                raise
         except BaseException:
-            await agen.aclose()
+            # Only roll back middlewares whose before_dispatch completed.
+            for mw in reversed(started):
+                await mw.after_dispatch(envelope)
             raise
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
@@ -381,7 +480,13 @@ async def _handle_tasks_resubscribe(request: Request, req_id: Any, params: dict[
         except Exception:
             logger.exception("JSON-RPC SSE resubscribe stream aborted")
         finally:
-            await agen.aclose()
+            try:
+                await agen.aclose()
+            finally:
+                # All middlewares in ``started`` successfully completed
+                # before_dispatch (otherwise we would have returned above).
+                for mw in reversed(started):
+                    await mw.after_dispatch(envelope)
 
     return StreamingResponse(_sse_generator(), media_type="text/event-stream")
 
@@ -541,9 +646,13 @@ async def _handle_get_extended_card(
 _JSONRPC_DISPATCH.update(
     {
         "message/send": _handle_message_send,
+        # Spec §3.5.6: the streaming method is "message/stream".
+        # "message/sendStream" is kept as a backwards-compatible alias.
+        "message/stream": _handle_message_send_stream,
         "message/sendStream": _handle_message_send_stream,
         "tasks/get": _handle_tasks_get,
-        "tasks/list": _handle_tasks_list,
+        # Spec §3.5.6: tasks/list is gRPC/REST only — intentionally NOT
+        # registered on the JSON-RPC transport. Clients must use REST.
         "tasks/cancel": _handle_tasks_cancel,
         "tasks/resubscribe": _handle_tasks_resubscribe,
         "tasks/pushNotificationConfig/set": _handle_push_set,

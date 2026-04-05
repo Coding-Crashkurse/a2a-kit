@@ -566,6 +566,7 @@ class RedisStorage(Storage[ContextT]):
         # Remove from context set and delete hash + idem key
         await self._r.srem(self._ctx_set_key(ctx_id), task_id)
         await self._r.delete(*keys_to_delete)
+        await self._cascade_push_delete_for_task(task_id)
         return True
 
     async def delete_context(self, context_id: str) -> int:
@@ -594,6 +595,7 @@ class RedisStorage(Storage[ContextT]):
         keys_to_delete.append(self._context_data_key(context_id))
         await self._r.delete(*keys_to_delete)
 
+        await self._cascade_push_delete_for_tasks(task_ids)
         return len(task_ids)
 
     async def get_version(self, task_id: str) -> int | None:

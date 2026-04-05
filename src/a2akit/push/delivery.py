@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from a2akit.endpoints import _sanitize_task_for_client
 from a2akit.push.validation import validate_webhook_url
 
 if TYPE_CHECKING:
@@ -186,7 +187,12 @@ class WebhookDeliveryService:
 
         assert self._http_client is not None
         headers = _build_headers(pnc)
-        payload = task.model_dump(mode="json", by_alias=True, exclude_none=True)
+        # Webhooks are external clients — strip framework-internal metadata
+        # keys (``_idempotency_key``, ``_a2akit_direct_reply`` etc.) exactly
+        # like REST/SSE responses do. Otherwise the webhook payload leaks
+        # internal state that REST clients never see.
+        sanitized_task = _sanitize_task_for_client(task)
+        payload = sanitized_task.model_dump(mode="json", by_alias=True, exclude_none=True)
 
         for attempt in range(1, self._max_retries + 1):
             async with self._semaphore:

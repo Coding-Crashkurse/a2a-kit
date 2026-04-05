@@ -308,6 +308,10 @@ class A2AServer:
                 from a2akit.push.store import InMemoryPushConfigStore
 
                 push_store = InMemoryPushConfigStore()
+                # Cascade: when a task (or its context) is deleted from
+                # Storage, the attached PushNotificationConfigs must be
+                # removed too, otherwise they orphan forever.
+                storage.bind_push_store(push_store)
                 delivery_service = WebhookDeliveryService(
                     max_retries=server._push_max_retries,
                     retry_base_delay=server._push_retry_delay,

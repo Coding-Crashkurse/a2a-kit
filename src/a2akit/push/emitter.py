@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from a2akit.event_emitter import EventEmitter
@@ -37,7 +35,6 @@ class PushDeliveryEmitter(EventEmitter):
         self._push_store = push_store
         self._delivery = delivery_service
         self._storage = storage
-        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def update_task(
         self,
@@ -61,33 +58,30 @@ class PushDeliveryEmitter(EventEmitter):
         )
 
         if state is not None:
-            # Load task snapshot NOW (before the next worker step changes it)
-            # to ensure the webhook delivers the correct state, not a future one.
-            task_snapshot = await self._storage.load_task(task_id)
-            if task_snapshot:
-                t = asyncio.create_task(self._deliver_snapshot(task_id, task_snapshot))
-                self._background_tasks.add(t)
-                t.add_done_callback(self._background_tasks.discard)
+            # Dispatch delivery INLINE (not via create_task) to preserve
+            # event ordering. With a background task per transition,
+            # the ``await get_configs_for_delivery`` becomes a scheduling
+            # point where two sibling trigger tasks for back-to-back
+            # transitions (e.g. working → completed) can interleave and
+            # reach the per-config queue's ``put_nowait`` in reversed
+            # order, delivering ``completed`` before ``working``.
+            # The actual HTTP send is still async and sequential via
+            # the WebhookDeliveryService per-config queue, so this path
+            # only adds two awaits (load_task + get_configs) per
+            # transition — it does not block on network I/O.
+            try:
+                task_snapshot = await self._storage.load_task(task_id)
+                if task_snapshot:
+                    configs = await self._push_store.get_configs_for_delivery(task_id)
+                    if configs:
+                        await self._delivery.deliver(configs, task_snapshot)
+            except Exception:
+                logger.exception("Push delivery trigger failed for task %s", task_id)
 
         return result
 
-    async def _deliver_snapshot(self, task_id: str, task: Any) -> None:
-        """Deliver a frozen task snapshot to webhook subscribers."""
-        try:
-            configs = await self._push_store.get_configs_for_delivery(task_id)
-            if not configs:
-                return
-            await self._delivery.deliver(configs, task)
-        except Exception:
-            logger.exception("Push delivery trigger failed for task %s", task_id)
-
     async def shutdown(self) -> None:
-        """Cancel outstanding delivery trigger tasks."""
-        for t in list(self._background_tasks):
-            t.cancel()
-        for t in list(self._background_tasks):
-            with suppress(asyncio.CancelledError):
-                await t
+        """No-op: delivery is dispatched inline, no background triggers to cancel."""
 
     async def send_event(self, task_id: str, event: StreamEvent) -> None:
         await self._inner.send_event(task_id, event)

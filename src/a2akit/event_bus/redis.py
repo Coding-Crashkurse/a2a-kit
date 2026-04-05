@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any, Self
 
 from a2a.types import (
@@ -190,7 +190,15 @@ class RedisEventBus(EventBus):
         """
         pubsub = self._r.pubsub()
         channel = f"{self._channel_prefix}{task_id}"
-        await pubsub.subscribe(channel)
+        try:
+            await pubsub.subscribe(channel)
+        except BaseException:
+            # Subscribe failed (e.g. Redis dropped between pubsub() and
+            # subscribe()). Release the PubSub object's connection back to
+            # the pool — otherwise it leaks until GC.
+            with suppress(Exception):
+                await pubsub.aclose()
+            raise
 
         try:
             yield self._iter_events(pubsub, task_id, after_event_id)
@@ -223,8 +231,16 @@ class RedisEventBus(EventBus):
             try:
                 entries = await self._r.xrange(stream_key, min=f"({after_event_id}", max="+")
             except aioredis.ResponseError:
-                logger.warning("Invalid after_event_id %r, skipping replay", after_event_id)
+                # Invalid stream ID (client passed garbage in Last-Event-ID).
+                # Fall back to replay-from-start: reset last_seen_id so the
+                # gap-fill phase below doesn't crash on the same invalid ID
+                # and instead delivers everything currently in the stream.
+                logger.warning(
+                    "Invalid after_event_id %r, falling back to replay-from-start",
+                    after_event_id,
+                )
                 entries = []
+                last_seen_id = "0-0"
             for entry_id, fields in entries:
                 eid = entry_id.decode() if isinstance(entry_id, bytes) else entry_id
                 data = fields.get(b"data", b"").decode()

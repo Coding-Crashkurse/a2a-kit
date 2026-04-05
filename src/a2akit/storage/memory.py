@@ -270,7 +270,10 @@ class InMemoryStorage(Storage[ContextT]):
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task by ID. Returns True if the task existed."""
         self._versions.pop(task_id, None)
-        return self.tasks.pop(task_id, None) is not None
+        existed = self.tasks.pop(task_id, None) is not None
+        if existed:
+            await self._cascade_push_delete_for_task(task_id)
+        return existed
 
     async def delete_context(self, context_id: str) -> int:
         """Delete all tasks in a context. Returns the number of deleted tasks."""
@@ -279,6 +282,7 @@ class InMemoryStorage(Storage[ContextT]):
             del self.tasks[tid]
             self._versions.pop(tid, None)
         self.contexts.pop(context_id, None)
+        await self._cascade_push_delete_for_tasks(to_delete)
         return len(to_delete)
 
     async def get_version(self, task_id: str) -> int | None:

@@ -259,48 +259,208 @@ class TestTasksCancel:
 
 
 class TestTasksList:
-    async def test_list_empty(self, jrpc_client):
+    """Spec §3.5.6: tasks/list is gRPC/REST only — NOT exposed on JSON-RPC."""
+
+    async def test_list_returns_method_not_found(self, jrpc_client):
         resp = await jrpc_client.post("/", json=_rpc("tasks/list", {}))
         data = resp.json()
-        assert "result" in data
-        assert data["result"]["tasks"] == []
-        assert data["result"]["totalSize"] == 0
+        assert "result" not in data
+        assert data["error"]["code"] == -32601  # Method not found
 
-    async def test_list_returns_created_tasks(self, jrpc_client):
-        # Create two tasks
-        params1 = _send_params("first")
-        params2 = _send_params("second")
-        resp1 = await jrpc_client.post("/", json=_rpc("message/send", params1))
-        resp2 = await jrpc_client.post("/", json=_rpc("message/send", params2))
-        task_id_1 = resp1.json()["result"]["id"]
-        task_id_2 = resp2.json()["result"]["id"]
-
-        resp = await jrpc_client.post("/", json=_rpc("tasks/list", {}))
-        data = resp.json()
-        assert "result" in data
-        result = data["result"]
-        assert result["totalSize"] == 2
-        returned_ids = {t["id"] for t in result["tasks"]}
-        assert task_id_1 in returned_ids
-        assert task_id_2 in returned_ids
-
-    async def test_list_with_page_size(self, jrpc_client):
-        # Create two tasks, request pageSize=1
-        await jrpc_client.post("/", json=_rpc("message/send", _send_params("a")))
-        await jrpc_client.post("/", json=_rpc("message/send", _send_params("b")))
-
+    async def test_list_with_params_also_rejected(self, jrpc_client):
         resp = await jrpc_client.post("/", json=_rpc("tasks/list", {"pageSize": 1}))
-        data = resp.json()["result"]
-        assert len(data["tasks"]) == 1
-        assert data["pageSize"] == 1
-        # Should have a next page token
-        assert data["nextPageToken"] != ""
+        data = resp.json()
+        assert "result" not in data
+        assert data["error"]["code"] == -32601
 
-    async def test_list_no_params(self, jrpc_client):
-        """tasks/list with no params at all should work (all optional)."""
+    async def test_list_no_params_rejected(self, jrpc_client):
         resp = await jrpc_client.post("/", json=_rpc("tasks/list"))
         data = resp.json()
-        assert "result" in data
+        assert "result" not in data
+        assert data["error"]["code"] == -32601
+
+
+class TestJsonRpcNotifications:
+    """Spec JSON-RPC 2.0 §4.1: server MUST NOT reply to a Notification.
+
+    A request is a Notification when the ``id`` member is OMITTED from the
+    envelope. An explicit ``"id": null`` is a regular request.
+    """
+
+    async def test_notification_message_send_returns_204(self, jrpc_client):
+        body = {
+            "jsonrpc": "2.0",
+            "method": "message/send",
+            "params": _send_params("fire and forget"),
+        }
+        # Ensure no id key present
+        assert "id" not in body
+        resp = await jrpc_client.post("/", json=body)
+        assert resp.status_code == 204
+        assert resp.content == b""
+
+    async def test_notification_tasks_get_returns_204(self, jrpc_client):
+        body = {
+            "jsonrpc": "2.0",
+            "method": "tasks/get",
+            "params": {"id": "does-not-exist"},
+        }
+        resp = await jrpc_client.post("/", json=body)
+        assert resp.status_code == 204
+        assert resp.content == b""
+
+    async def test_notification_unknown_method_returns_204(self, jrpc_client):
+        body = {"jsonrpc": "2.0", "method": "no/such/method", "params": {}}
+        resp = await jrpc_client.post("/", json=body)
+        assert resp.status_code == 204
+        assert resp.content == b""
+
+    async def test_explicit_null_id_is_not_notification(self, jrpc_client):
+        """{"id": null} is a regular request, not a notification."""
+        body = {
+            "jsonrpc": "2.0",
+            "id": None,
+            "method": "tasks/get",
+            "params": {"id": "missing-task"},
+        }
+        resp = await jrpc_client.post("/", json=body)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] is None
+        assert "error" in data
+
+
+class TestJsonRpcResubscribeHeader:
+    """Spec §7.4.1 / §7.9: tasks/resubscribe params are TaskIdParams only.
+
+    The SSE resume point is carried via the W3C Last-Event-ID HTTP header,
+    not in the JSON-RPC payload.
+    """
+
+    async def test_resubscribe_reads_last_event_id_from_header(
+        self, jrpc_streaming_client, monkeypatch
+    ):
+        import a2akit.jsonrpc as jrpc_module
+
+        captured: dict[str, object] = {}
+
+        # Monkey-patch TaskManager.subscribe_task via the module-level getter
+        # by wrapping the helper. We intercept at the handler level instead.
+        original_get_tm = jrpc_module._get_tm
+
+        class _StubTM:
+            def subscribe_task(self, task_id, *, after_event_id=None):
+                captured["task_id"] = task_id
+                captured["after_event_id"] = after_event_id
+
+                async def _gen():
+                    if False:
+                        yield
+
+                return _gen()
+
+        def _stub_get_tm(_req):
+            return _StubTM()
+
+        monkeypatch.setattr(jrpc_module, "_get_tm", _stub_get_tm)
+        try:
+            await jrpc_streaming_client.post(
+                "/",
+                json=_rpc("tasks/resubscribe", {"id": "task-123"}),
+                headers={"Last-Event-ID": "42"},
+            )
+        finally:
+            monkeypatch.setattr(jrpc_module, "_get_tm", original_get_tm)
+
+        assert captured["task_id"] == "task-123"
+        assert captured["after_event_id"] == "42"
+
+    async def test_resubscribe_ignores_payload_last_event_id(
+        self, jrpc_streaming_client, monkeypatch
+    ):
+        """lastEventId in the JSON-RPC payload is NOT part of TaskIdParams
+        and must be ignored by the server."""
+        import a2akit.jsonrpc as jrpc_module
+
+        captured: dict[str, object] = {}
+
+        class _StubTM:
+            def subscribe_task(self, task_id, *, after_event_id=None):
+                captured["after_event_id"] = after_event_id
+
+                async def _gen():
+                    if False:
+                        yield
+
+                return _gen()
+
+        monkeypatch.setattr(jrpc_module, "_get_tm", lambda _req: _StubTM())
+
+        await jrpc_streaming_client.post(
+            "/",
+            json=_rpc("tasks/resubscribe", {"id": "t", "lastEventId": "99"}),
+        )
+        # Payload lastEventId must NOT leak into subscribe_task.
+        assert captured["after_event_id"] is None
+
+
+class TestJsonRpcAuthEnforcement:
+    """Spec §4.4: server MUST authenticate EVERY incoming request.
+
+    Middleware must fire on tasks/*, pushNotificationConfig/*, and
+    agent/getAuthenticatedExtendedCard — not only on message/send.
+    """
+
+    @pytest.fixture
+    async def authed_jrpc_client(self):
+        from a2akit.middleware import ApiKeyMiddleware
+
+        server = A2AServer(
+            worker=EchoWorker(),
+            agent_card=AgentCardConfig(
+                name="Test",
+                description="Test",
+                version="0.0.1",
+                protocol="jsonrpc",
+                capabilities=CapabilitiesConfig(streaming=True),
+            ),
+            middlewares=[ApiKeyMiddleware(valid_keys={"secret-key"})],
+        )
+        app = server.as_fastapi_app()
+        async with LifespanManager(app) as mgr:
+            transport = httpx.ASGITransport(app=mgr.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+                yield c
+
+    async def test_tasks_get_requires_auth(self, authed_jrpc_client):
+        resp = await authed_jrpc_client.post("/", json=_rpc("tasks/get", {"id": "some-task"}))
+        data = resp.json()
+        assert "error" in data
+        assert "authentication" in data["error"]["message"].lower()
+
+    async def test_tasks_cancel_requires_auth(self, authed_jrpc_client):
+        resp = await authed_jrpc_client.post("/", json=_rpc("tasks/cancel", {"id": "some-task"}))
+        data = resp.json()
+        assert "error" in data
+        assert "authentication" in data["error"]["message"].lower()
+
+    async def test_tasks_resubscribe_requires_auth(self, authed_jrpc_client):
+        resp = await authed_jrpc_client.post(
+            "/", json=_rpc("tasks/resubscribe", {"id": "some-task"})
+        )
+        data = resp.json()
+        assert "error" in data
+        assert "authentication" in data["error"]["message"].lower()
+
+    async def test_tasks_get_with_valid_key_passes(self, authed_jrpc_client):
+        resp = await authed_jrpc_client.post(
+            "/",
+            json=_rpc("tasks/get", {"id": "missing-task"}),
+            headers={"X-API-Key": "secret-key"},
+        )
+        data = resp.json()
+        # Auth passed — now we get TASK_NOT_FOUND instead of auth error
+        assert data["error"]["code"] == -32001
 
 
 class TestMessageSendStream:

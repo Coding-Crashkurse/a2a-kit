@@ -4,6 +4,130 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.29] — 2026-04-05
+
+### Fixed
+- **JSON-RPC streaming method renamed to spec-compliant `message/stream`** —
+  the A2A spec (§3.5.6, §7.2) defines the streaming method as `message/stream`,
+  but the JSON-RPC dispatch only registered `message/sendStream`, so a
+  spec-compliant client sending `{"method": "message/stream"}` received
+  `Method not found`. The dispatch now registers `message/stream` as the
+  primary method; `message/sendStream` is retained as a backwards-compat
+  alias. The built-in JSON-RPC client transport, the OpenTelemetry span
+  name mapping, and the embedded Debug UI bundle now all emit the
+  spec-compliant name as well.
+- **Middleware `after_dispatch` leaked when `before_dispatch` raised
+  mid-pipeline** — all seven dispatch sites (REST
+  `_enforce_middleware_pipeline` / `_stream_setup` / `message_send`,
+  JSON-RPC generic dispatcher / `message/send` / `message/stream` /
+  `tasks/resubscribe`) ran the `before_dispatch` loop without tracking
+  which middlewares had completed. On auth rejection (`BearerTokenMiddleware`
+  raising `AuthenticationRequiredError`), every middleware upstream of the
+  rejecting one — including `TracingMiddleware` at position 0 — had
+  already allocated resources in `before_dispatch` but never received
+  a matching `after_dispatch`. Result: leaked OTel spans (never ended)
+  and dangling OTel context tokens (never detached) on every
+  unauthenticated request. All sites now track a `started` list and
+  only roll back middlewares whose `before_dispatch` succeeded.
+- **JSON-RPC `tasks/resubscribe` ended tracing spans before the SSE
+  stream started** — the generic dispatcher's `finally` ran
+  `after_dispatch` the moment `_handle_tasks_resubscribe` returned a
+  `StreamingResponse`, i.e. before Starlette began iterating the SSE
+  generator. `TracingMiddleware` ended the span and detached the OTel
+  context while the stream was still alive; every event emitted during
+  resubscribe was span-less. `tasks/resubscribe` is now listed in
+  `_MIDDLEWARE_SELF_HANDLED_METHODS` and runs the middleware pipeline
+  itself, deferring `after_dispatch` to the SSE generator's `finally`.
+- **`_versioned_update` could overwrite the status message of a
+  just-canceled task** — when `send_status("...")` raced a force-cancel
+  write, the first `update_task` call hit `ConcurrencyError` with
+  `state=None`, so `_versioned_update`'s terminal-state guard (which
+  only fired for state-transitioning writes) allowed the retry to
+  succeed. The retry silently replaced `"Task was canceled."` with
+  the stale progress text, leaving `state=canceled` paired with a
+  misleading status message for polling clients. The guard now also
+  fires when the write would overwrite `status.message` on a terminal
+  task; artifact-only and history-only writes on terminal tasks remain
+  allowed (force-cancel still drains pending artifacts into the
+  canceled state via this path).
+- **`_force_cancel_after` cleanup steps were not isolated** — a
+  transient failure in `event_bus.cleanup` (e.g. Redis blip) skipped
+  `cancel_registry.cleanup` entirely, leaking the CancelRegistry key
+  and its Redis Pub/Sub listener until process restart. Each cleanup
+  call is now wrapped in its own `try/except`, mirroring the pattern
+  already used in `WorkerAdapter._run_task_inner`.
+- **`RedisEventBus.subscribe` leaked its PubSub connection on subscribe
+  failure** — if `pubsub.subscribe(channel)` raised (e.g. connection
+  dropped mid-SUBSCRIBE), the exception propagated out of the
+  `@asynccontextmanager` before the `try/finally` block was entered,
+  so `pubsub.aclose()` was never called and the connection sat in the
+  pool until GC. The `subscribe()` call is now wrapped in a dedicated
+  `try/except BaseException` that closes the PubSub object on failure.
+- **`RedisEventBus._iter_events` crashed on invalid `Last-Event-ID`** —
+  when a client passed a non-stream-ID value (e.g. `"not-a-number"`),
+  the Phase 1 replay caught the resulting `ResponseError` but left
+  `last_seen_id` set to the invalid value. Phase 2 (gap-fill) then
+  issued the same invalid `XRANGE` and crashed with
+  `Invalid stream ID specified as stream command argument`. The
+  replay fallback now resets `last_seen_id` to `"0-0"`, matching the
+  documented "fall back to replay-from-start" semantics.
+- **JSON-RPC client `subscribe_task` did not send `Last-Event-ID`** —
+  the transport packed `lastEventId` into the JSON-RPC params, but the
+  server reads the resume point from the standard `Last-Event-ID` HTTP
+  header (spec §7.9 — `TaskIdParams` only carries `id` and `metadata`).
+  The server saw `after_event_id=None`, so reconnecting to a
+  non-terminal task skipped replay of missed events, and reconnecting
+  to a terminal task raised `UnsupportedOperationError` instead of
+  yielding the final snapshot. The client now sends the header and no
+  longer pollutes the params with the dead field; REST transport was
+  already correct.
+- **Webhook payload leaked framework-internal metadata** —
+  `WebhookDeliveryService` dumped the raw `Task` model to the webhook
+  payload, so internal markers (`_idempotency_key`,
+  `_a2akit_direct_reply`, future underscore-prefixed keys) reached
+  external push receivers — keys that REST / SSE clients never see.
+  Webhook payloads now pass through `_sanitize_task_for_client`.
+- **SSRF allow-list was incomplete** — `_is_blocked_ip` used a
+  hand-maintained list of private ranges and missed bypass vectors
+  notably `0.0.0.0` (which Linux/macOS silently route to localhost).
+  Validation now delegates to Python's `ip.is_global` (IANA
+  special-purpose registries) which automatically rejects loopback,
+  private (RFC1918 / RFC4193 ULA), link-local, reserved, shared
+  address space, benchmarking, documentation, and multicast ranges.
+  IPv4-mapped IPv6 addresses continue to be unwrapped first so an
+  attacker cannot smuggle a private IPv4 through an IPv6 literal.
+- **Push-config orphans on task/context deletion** — deleting a task
+  (or its entire context) left its attached `PushNotificationConfig`
+  rows in the store forever. `Storage` now has a `bind_push_store`
+  hook and cascade helpers; SQL and Redis backends call them after
+  `delete_task` / `delete_context` succeeds. Cascade failures are
+  logged but never roll back the primary deletion.
+- **Push delivery could reorder back-to-back state transitions** —
+  `PushDeliveryEmitter` spawned a background task per transition to
+  load the task snapshot and enqueue the webhook. The
+  `await get_configs_for_delivery` inside that task was a scheduling
+  point where sibling tasks for `working` → `completed` transitions
+  could interleave and reach the per-config queue's `put_nowait` in
+  reverse order, delivering `completed` before `working`. Delivery
+  is now dispatched inline (still async, still sequential via the
+  per-config queue) — two extra awaits per transition, no network
+  I/O on the hot path, strict ordering preserved.
+- **Worker semaphore lost backpressure on the broker queue** — the
+  concurrency limit was enforced inside `_handle_op`, so
+  `_broker_loop` could still pull unacknowledged messages out of the
+  broker and park them behind the semaphore in local memory. With
+  Redis Streams (`XREADGROUP`) this meant other workers couldn't
+  claim the backlog and large queues caused OOM. The semaphore is
+  now acquired in `_broker_loop` _before_ the next message is
+  pulled and released in `_handle_op`'s `finally`.
+- **Artifacts buffered at cancel time were lost** —
+  `cancel_task_in_storage` wrote the canceled state without draining
+  the worker's pending artifact buffer, so mid-run artifacts were
+  discarded. The helper now takes an optional `artifacts` list and
+  writes it atomically with the cancel transition;
+  `WorkerAdapter._run_task_inner` drains the buffer into that list
+  on both cooperative and force cancel paths.
+
 ## [0.0.28] — 2026-04-05
 
 ### Fixed

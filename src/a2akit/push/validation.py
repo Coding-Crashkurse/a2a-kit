@@ -9,23 +9,27 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-_BLOCKED_RANGES = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-]
-
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Check whether an IP address falls into a blocked (private/loopback) range."""
+    """Check whether an IP address is unsafe to reach from the server.
+
+    Uses Python's own ``is_global`` classification (maintained against the
+    IANA special-purpose address registries) rather than a hand-maintained
+    allow/deny list. This automatically rejects:
+
+    - Loopback (127.0.0.0/8, ::1)
+    - Private (RFC 1918, RFC 4193 ULA)
+    - Link-local (169.254.0.0/16, fe80::/10)
+    - Reserved / unspecified (notably ``0.0.0.0``, which Linux/macOS
+      silently route to localhost — a classic SSRF bypass vector)
+    - Shared address space, benchmarking, documentation, multicast, etc.
+
+    IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``) are unwrapped first so
+    that an attacker cannot smuggle a private IPv4 through an IPv6 literal.
+    """
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
-    return any(ip in blocked for blocked in _BLOCKED_RANGES)
+    return not ip.is_global
 
 
 async def validate_webhook_url(

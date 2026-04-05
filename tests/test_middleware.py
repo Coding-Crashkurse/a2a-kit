@@ -231,3 +231,81 @@ async def test_request_envelope_defaults():
     env = RequestEnvelope(params=params)
     assert env.context == {}
     assert env.params is params
+
+
+@pytest.mark.asyncio
+async def test_request_envelope_paramless():
+    """RequestEnvelope supports params=None for non-message endpoints."""
+    env = RequestEnvelope()
+    assert env.params is None
+    assert env.context == {}
+
+
+@pytest.mark.asyncio
+async def test_rest_auth_enforced_on_tasks_get():
+    """Spec §4.4: tasks/get MUST run through the middleware pipeline."""
+    from a2akit.middleware import ApiKeyMiddleware
+
+    raw = _make_app(EchoContextWorker(), middlewares=[ApiKeyMiddleware(valid_keys={"sk-ok"})])
+    async with LifespanManager(raw) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            # Unauthenticated: must fail with 401
+            resp_noauth = await c.get("/v1/tasks/some-id")
+            assert resp_noauth.status_code == 401
+
+            # Authenticated: auth passes, task lookup fails with 404
+            resp_ok = await c.get("/v1/tasks/some-id", headers={"X-API-Key": "sk-ok"})
+            assert resp_ok.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_rest_auth_enforced_on_tasks_cancel():
+    """Spec §4.4: tasks/cancel MUST run through the middleware pipeline."""
+    from a2akit.middleware import ApiKeyMiddleware
+
+    raw = _make_app(EchoContextWorker(), middlewares=[ApiKeyMiddleware(valid_keys={"sk-ok"})])
+    async with LifespanManager(raw) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post("/v1/tasks/some-id:cancel")
+            assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_rest_auth_enforced_on_extended_card():
+    """Spec §4.4: agent/getAuthenticatedExtendedCard MUST require auth."""
+    from a2akit.middleware import ApiKeyMiddleware
+
+    raw = _make_app(EchoContextWorker(), middlewares=[ApiKeyMiddleware(valid_keys={"sk-ok"})])
+    async with LifespanManager(raw) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/v1/card")
+            assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_rest_auth_enforced_on_push_config():
+    """Spec §4.4: pushNotificationConfig endpoints MUST require auth."""
+    from a2akit.middleware import ApiKeyMiddleware
+
+    raw = _make_app(EchoContextWorker(), middlewares=[ApiKeyMiddleware(valid_keys={"sk-ok"})])
+    async with LifespanManager(raw) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/v1/tasks/some-id/pushNotificationConfigs")
+            assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_rest_health_is_public():
+    """/v1/health must remain unauthenticated even with middleware configured."""
+    from a2akit.middleware import ApiKeyMiddleware
+
+    raw = _make_app(EchoContextWorker(), middlewares=[ApiKeyMiddleware(valid_keys={"sk-ok"})])
+    async with LifespanManager(raw) as manager:
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/v1/health")
+            assert resp.status_code == 200

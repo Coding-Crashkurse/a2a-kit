@@ -406,17 +406,30 @@ class SQLStorageBase(Storage[ContextT]):
     async def delete_task(self, task_id: str) -> bool:
         async with self._get_session() as session, session.begin():
             result = await session.execute(tasks_table.delete().where(tasks_table.c.id == task_id))
-            return bool(getattr(result, "rowcount", 0) > 0)
+            existed = bool(getattr(result, "rowcount", 0) > 0)
+        if existed:
+            await self._cascade_push_delete_for_task(task_id)
+        return existed
 
     async def delete_context(self, context_id: str) -> int:
         async with self._get_session() as session, session.begin():
+            # Capture affected task_ids BEFORE the delete so we can cascade
+            # push-config cleanup after the transaction commits.
+            id_rows = await session.execute(
+                tasks_table.select()
+                .with_only_columns(tasks_table.c.id)
+                .where(tasks_table.c.context_id == context_id)
+            )
+            affected_task_ids = [row.id for row in id_rows]
             result = await session.execute(
                 tasks_table.delete().where(tasks_table.c.context_id == context_id)
             )
             await session.execute(
                 contexts_table.delete().where(contexts_table.c.context_id == context_id)
             )
-            return int(getattr(result, "rowcount", 0))
+            rowcount = int(getattr(result, "rowcount", 0))
+        await self._cascade_push_delete_for_tasks(affected_task_ids)
+        return rowcount
 
     async def get_version(self, task_id: str) -> int | None:
         async with self._get_session() as session:

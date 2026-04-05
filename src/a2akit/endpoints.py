@@ -160,6 +160,68 @@ def _validate_ids(params: MessageSendParams) -> MessageSendParams:
     return params
 
 
+# Paths whose handlers run their own per-request middleware pipeline
+# (they build a params-aware envelope themselves) and MUST NOT be
+# double-processed by the router-level auth dependency.
+_MIDDLEWARE_SELF_HANDLED_PATHS: frozenset[str] = frozenset(
+    {
+        "/v1/message:send",
+        "/v1/message:stream",
+    }
+)
+
+# Paths that are intentionally unauthenticated (liveness / readiness).
+_MIDDLEWARE_PUBLIC_PATHS: frozenset[str] = frozenset(
+    {
+        "/v1/health",
+        "/v1/health/ready",
+    }
+)
+
+
+async def _enforce_middleware_pipeline(
+    request: Request,
+) -> AsyncGenerator[None, None]:
+    """Router dependency: run the A2A middleware pipeline on every A2A endpoint.
+
+    Spec §4.4 requires the server to authenticate EVERY incoming request.
+    The message/send and message/stream handlers build a params-aware
+    envelope themselves and run the pipeline with real ``MessageSendParams``;
+    for every other endpoint (``tasks/*``, ``pushNotificationConfig/*``,
+    ``/v1/card``) this dependency runs the pipeline with an empty envelope
+    so that auth middlewares (Bearer, ApiKey, custom) fire uniformly.
+
+    ``RequestEnvelope.params`` is ``None`` in this mode — middlewares that
+    need params (e.g. TracingMiddleware) are expected to guard for it.
+    """
+    path = request.url.path
+    if path in _MIDDLEWARE_SELF_HANDLED_PATHS or path in _MIDDLEWARE_PUBLIC_PATHS:
+        yield
+        return
+
+    middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
+    if not middlewares:
+        yield
+        return
+
+    envelope = RequestEnvelope()
+    started: list[A2AMiddleware] = []
+    try:
+        for mw in middlewares:
+            await mw.before_dispatch(envelope, request)
+            started.append(mw)
+        yield
+    finally:
+        # Only call after_dispatch on middlewares whose before_dispatch
+        # succeeded — otherwise a middleware that raised during setup
+        # (e.g. auth rejection) would get an after_dispatch without a
+        # matching before_dispatch, and any middleware upstream of it
+        # would leak resources (OTel span, context token, ...) because
+        # its own after_dispatch was never reached.
+        for mw in reversed(started):
+            await mw.after_dispatch(envelope)
+
+
 async def _stream_setup(
     request: Request,
     params: MessageSendParams,
@@ -180,10 +242,13 @@ async def _stream_setup(
     middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
 
     envelope = RequestEnvelope(params=params)
-    for mw in middlewares:
-        await mw.before_dispatch(envelope, request)
-
+    started: list[A2AMiddleware] = []
     try:
+        for mw in middlewares:
+            await mw.before_dispatch(envelope, request)
+            started.append(mw)
+
+        assert envelope.params is not None  # message endpoints always carry params
         agen = tm.stream_message(envelope.params, request_context=envelope.context)
         try:
             first_pair = await anext(agen)
@@ -191,7 +256,9 @@ async def _stream_setup(
             await agen.aclose()
             raise
     except BaseException:
-        for mw in reversed(middlewares):
+        # Run after_dispatch only for middlewares that successfully
+        # completed before_dispatch, in reverse order.
+        for mw in reversed(started):
             await mw.after_dispatch(envelope)
         raise
     return first_pair, agen, middlewares, envelope
@@ -220,7 +287,12 @@ async def _subscribe_setup(
 
 def build_a2a_router() -> APIRouter:
     """Build and return the complete A2A API router."""
-    router = APIRouter(dependencies=[Depends(_check_a2a_version)])
+    router = APIRouter(
+        dependencies=[
+            Depends(_check_a2a_version),
+            Depends(_enforce_middleware_pipeline),
+        ]
+    )
 
     @router.post("/v1/message:send", tags=["Messages"])
     async def message_send(request: Request, params: MessageSendParams) -> JSONResponse:
@@ -230,18 +302,21 @@ def build_a2a_router() -> APIRouter:
         middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
 
         envelope = RequestEnvelope(params=params)
-
-        for mw in middlewares:
-            await mw.before_dispatch(envelope, request)
+        started: list[A2AMiddleware] = []
 
         try:
+            for mw in middlewares:
+                await mw.before_dispatch(envelope, request)
+                started.append(mw)
+
+            assert envelope.params is not None  # message endpoints always carry params
             result = await tm.send_message(envelope.params, request_context=envelope.context)
         except Exception:
-            for mw in reversed(middlewares):
+            for mw in reversed(started):
                 await mw.after_dispatch(envelope)
             raise
 
-        for mw in reversed(middlewares):
+        for mw in reversed(started):
             await mw.after_dispatch(envelope, result)
 
         if isinstance(result, Task):

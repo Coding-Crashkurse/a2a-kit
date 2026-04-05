@@ -511,8 +511,8 @@ async def test_event_bus_publish_returns_event_id():
         assert id2 == "2"
 
 
-async def test_jsonrpc_list_tasks_status_filter():
-    """tasks/list via JSON-RPC filters by status."""
+async def test_jsonrpc_list_tasks_not_exposed():
+    """tasks/list MUST NOT be exposed over JSON-RPC (spec §3.5.6: gRPC/REST only)."""
     server = A2AServer(
         worker=EchoWorker(),
         agent_card=AgentCardConfig(
@@ -526,38 +526,20 @@ async def test_jsonrpc_list_tasks_status_filter():
     async with LifespanManager(app) as mgr:
         transport = httpx.ASGITransport(app=mgr.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-            # Create a task.
-            await c.post(
-                "/",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "message/send",
-                    "params": {
-                        "message": {
-                            "role": "user",
-                            "messageId": str(uuid.uuid4()),
-                            "parts": [{"kind": "text", "text": "hi"}],
-                        },
-                        "configuration": {"blocking": True},
-                    },
-                },
-            )
-            # List with status filter.
             r = await c.post(
                 "/",
                 json={
                     "jsonrpc": "2.0",
-                    "id": 2,
+                    "id": 1,
                     "method": "tasks/list",
                     "params": {"status": "completed"},
                 },
             )
             data = r.json()
-            result = data["result"]
-            assert len(result["tasks"]) >= 1
-            for t in result["tasks"]:
-                assert t["status"]["state"] == "completed"
+            # Spec §3.5.6: tasks/list is gRPC/REST only — JSON-RPC must
+            # report METHOD_NOT_FOUND (-32601).
+            assert "result" not in data
+            assert data["error"]["code"] == -32601
 
 
 async def test_stream_message_registers_push_config():

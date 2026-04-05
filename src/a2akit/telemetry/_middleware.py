@@ -34,7 +34,7 @@ def _detect_method(request: Request) -> str:
     if "send" in path and "stream" not in path.lower():
         return "message/send"
     if "stream" in path.lower():
-        return "message/sendStream"
+        return "message/stream"
     if "cancel" in path:
         return "tasks/cancel"
     if "subscribe" in path:
@@ -65,17 +65,30 @@ class TracingMiddleware(A2AMiddleware):
         headers: dict[str, str] = dict(request.headers)
         ctx = extract(headers)
 
-        msg = envelope.params.message
-        span = tracer.start_span(
-            SPAN_HTTP_REQUEST,
-            context=ctx,
-            kind=SpanKind.SERVER,
-            attributes={
+        # Non-message endpoints (tasks/get, tasks/cancel, push, extended card)
+        # run the middleware pipeline for auth but carry no MessageSendParams.
+        # Emit a span with path-derived attributes only.
+        if envelope.params is None:
+            attributes: dict[str, Any] = {
+                ATTR_TASK_ID: "",
+                ATTR_CONTEXT_ID: "",
+                ATTR_MESSAGE_ID: "",
+                ATTR_METHOD: _detect_method(request),
+            }
+        else:
+            msg = envelope.params.message
+            attributes = {
                 ATTR_TASK_ID: msg.task_id or "",
                 ATTR_CONTEXT_ID: msg.context_id or "",
                 ATTR_MESSAGE_ID: msg.message_id or "",
                 ATTR_METHOD: _detect_method(request),
-            },
+            }
+
+        span = tracer.start_span(
+            SPAN_HTTP_REQUEST,
+            context=ctx,
+            kind=SpanKind.SERVER,
+            attributes=attributes,
         )
         envelope.context["_otel_span"] = span
         token = otel_context.attach(set_span_in_context(span))
