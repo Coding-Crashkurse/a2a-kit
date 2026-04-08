@@ -160,7 +160,7 @@ export async function sendStreamingRequest(
           if (kind === "status-update") {
             const statusText = extractStatusText(parsed);
             const state = parsed.status?.state || "";
-            if (statusText) cb.onStatus(statusText, state);
+            if (statusText || state) cb.onStatus(statusText, state);
           } else if (kind === "artifact-update") {
             const chunk = extractArtifactText(parsed);
             const state = parsed.status?.state || "";

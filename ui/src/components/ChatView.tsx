@@ -208,7 +208,8 @@ export function ChatView({ card }: Props) {
           if (agentMsgId) {
             const id = agentMsgId;
             const st = lastState;
-            const t = text || agentText;
+            // Prefer accumulated artifact text over transient status text
+            const t = agentText || text;
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === id ? { ...m, text: t || m.text, state: st } : m,

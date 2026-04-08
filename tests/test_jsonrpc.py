@@ -259,25 +259,27 @@ class TestTasksCancel:
 
 
 class TestTasksList:
-    """Spec §3.5.6: tasks/list is gRPC/REST only — NOT exposed on JSON-RPC."""
+    """Spec v1.0 §9.4.4: tasks/list is available on JSON-RPC."""
 
-    async def test_list_returns_method_not_found(self, jrpc_client):
+    async def test_list_returns_result(self, jrpc_client):
         resp = await jrpc_client.post("/", json=_rpc("tasks/list", {}))
         data = resp.json()
-        assert "result" not in data
-        assert data["error"]["code"] == -32601  # Method not found
+        assert "error" not in data
+        assert "result" in data
+        assert "tasks" in data["result"]
+        assert isinstance(data["result"]["tasks"], list)
 
-    async def test_list_with_params_also_rejected(self, jrpc_client):
+    async def test_list_with_page_size(self, jrpc_client):
         resp = await jrpc_client.post("/", json=_rpc("tasks/list", {"pageSize": 1}))
         data = resp.json()
-        assert "result" not in data
-        assert data["error"]["code"] == -32601
+        assert "error" not in data
+        assert data["result"]["pageSize"] == 1
 
-    async def test_list_no_params_rejected(self, jrpc_client):
+    async def test_list_no_params(self, jrpc_client):
         resp = await jrpc_client.post("/", json=_rpc("tasks/list"))
         data = resp.json()
-        assert "result" not in data
-        assert data["error"]["code"] == -32601
+        assert "error" not in data
+        assert "tasks" in data["result"]
 
 
 class TestJsonRpcNotifications:

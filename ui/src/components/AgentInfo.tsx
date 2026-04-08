@@ -31,7 +31,7 @@ export function AgentInfo({
     );
   }
 
-  const proto = card.preferredTransport === "jsonrpc" ? "JSON-RPC" : "HTTP+JSON";
+  const proto = card.preferredTransport?.toLowerCase() === "jsonrpc" ? "JSON-RPC" : "HTTP+JSON";
   const streaming = card.capabilities?.streaming;
   const stateHistory = card.capabilities?.stateTransitionHistory;
   const inputModes = card.defaultInputModes || [];

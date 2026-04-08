@@ -511,8 +511,8 @@ async def test_event_bus_publish_returns_event_id():
         assert id2 == "2"
 
 
-async def test_jsonrpc_list_tasks_not_exposed():
-    """tasks/list MUST NOT be exposed over JSON-RPC (spec §3.5.6: gRPC/REST only)."""
+async def test_jsonrpc_list_tasks_exposed():
+    """tasks/list MUST be available over JSON-RPC (spec v1.0 §9.4.4)."""
     server = A2AServer(
         worker=EchoWorker(),
         agent_card=AgentCardConfig(
@@ -532,14 +532,13 @@ async def test_jsonrpc_list_tasks_not_exposed():
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "tasks/list",
-                    "params": {"status": "completed"},
+                    "params": {},
                 },
             )
             data = r.json()
-            # Spec §3.5.6: tasks/list is gRPC/REST only — JSON-RPC must
-            # report METHOD_NOT_FOUND (-32601).
-            assert "result" not in data
-            assert data["error"]["code"] == -32601
+            assert "error" not in data
+            assert "result" in data
+            assert "tasks" in data["result"]
 
 
 async def test_stream_message_registers_push_config():

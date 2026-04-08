@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.32] — 2026-04-08
+
+### Fixed
+- **Debug UI: completed state silently dropped in streaming chat** — the final
+  `status-update` SSE event with `state="completed"` had no message text, causing
+  the UI to skip the `onStatus` callback entirely. The chat message stayed on
+  "working" instead of showing "completed". Now fires `onStatus` when state is
+  present, even without text.
+- **Debug UI: artifact text overwritten by intermediate status updates** — when a
+  worker emitted `send_status()` between `emit_text_artifact()` calls, the
+  accumulated artifact content was replaced with the transient status text.
+  `onStatus` now preserves artifact text over status text.
+- **Debug UI: protocol label showed "HTTP+JSON" for JSON-RPC agents** —
+  case-sensitive comparison (`"JSONRPC" === "jsonrpc"`) failed for the enum value
+  returned by the server. Now uses case-insensitive matching.
+
+### Added
+- **`tasks/list` on JSON-RPC transport** — previously only available on REST per
+  spec v0.3 §3.5.6. Now exposed on JSON-RPC as well (spec v1.0 §9.4.4 added it
+  officially). Required for Debug UI task listing to work in JSON-RPC mode.
+
 ## [0.0.31] — 2026-04-07
 
 ### Fixed

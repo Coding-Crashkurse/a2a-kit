@@ -19,6 +19,7 @@ from a2akit.storage import ContextMismatchError, TaskNotAcceptingMessagesError
 from a2akit.storage.base import (
     ContentTypeNotSupportedError,
     InvalidAgentResponseError,
+    ListTasksQuery,
     TaskNotCancelableError,
     TaskNotFoundError,
     TaskTerminalStateError,
@@ -400,6 +401,30 @@ async def _handle_tasks_get(request: Request, req_id: Any, params: dict[str, Any
         return _map_exception_to_error(req_id, exc)
 
 
+async def _handle_tasks_list(
+    request: Request, req_id: Any, params: dict[str, Any]
+) -> JSONResponse:
+    """Handle tasks/list."""
+    try:
+        tm = _get_tm(request)
+        query = ListTasksQuery(
+            context_id=params.get("contextId"),
+            status=params.get("status"),
+            page_size=params.get("pageSize", 50),
+            page_token=params.get("pageToken"),
+            history_length=params.get("historyLength"),
+            status_timestamp_after=params.get("statusTimestampAfter"),
+            include_artifacts=params.get("includeArtifacts", False),
+        )
+        result = await tm.list_tasks(query)
+        result.tasks = [_sanitize_task_for_client(t) for t in result.tasks]
+        return _result_response(
+            req_id, result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
+    except Exception as exc:
+        return _map_exception_to_error(req_id, exc)
+
+
 async def _handle_tasks_cancel(
     request: Request, req_id: Any, params: dict[str, Any]
 ) -> JSONResponse:
@@ -651,8 +676,10 @@ _JSONRPC_DISPATCH.update(
         "message/stream": _handle_message_send_stream,
         "message/sendStream": _handle_message_send_stream,
         "tasks/get": _handle_tasks_get,
-        # Spec §3.5.6: tasks/list is gRPC/REST only — intentionally NOT
-        # registered on the JSON-RPC transport. Clients must use REST.
+        # Spec v0.3 §3.5.6 marks tasks/list as gRPC/REST only — we expose
+        # it anyway for Debug UI support.  Spec v1.0 §9.4.4 added it to
+        # the JSON-RPC binding officially.
+        "tasks/list": _handle_tasks_list,
         "tasks/cancel": _handle_tasks_cancel,
         "tasks/resubscribe": _handle_tasks_resubscribe,
         "tasks/pushNotificationConfig/set": _handle_push_set,
