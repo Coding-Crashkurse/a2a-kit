@@ -1,21 +1,23 @@
-"""AgentCard configuration and builder utilities."""
+"""AgentCard configuration and builder utilities.
+
+Exposes a version-agnostic :class:`AgentCardConfig` plus two builders:
+
+- :func:`build_agent_card_v03` — renders the v0.3 wire shape.
+- :func:`build_agent_card_v10` — renders the v1.0 wire shape with
+  ``supported_interfaces[]`` instead of ``url`` / ``preferred_transport``.
+
+The dispatcher :func:`build_agent_card` picks one based on the requested
+protocol version (defaults to v1.0 per spec §6).
+"""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from a2a.types import (
-    AgentCapabilities,
-    AgentCard,
-    AgentCardSignature,
-    AgentExtension,
-    AgentInterface,
-    AgentProvider,
-    AgentSkill,
-    SecurityScheme,
-    TransportProtocol,
-)
+from a2a_pydantic import v03, v10
 from pydantic import BaseModel, Field
+
+from a2akit._protocol import ProtocolVersion
 
 
 class ProviderConfig(BaseModel):
@@ -52,17 +54,7 @@ class SkillConfig(BaseModel):
 
 
 class ExtensionConfig(BaseModel):
-    """User-friendly extension definition without A2A protocol imports.
-
-    Example::
-
-        ExtensionConfig(
-            uri="urn:example:custom-logging",
-            description="Custom structured logging extension",
-            required=True,
-            params={"log_level": "debug"},
-        )
-    """
+    """User-friendly extension definition without A2A protocol imports."""
 
     uri: str
     description: str | None = None
@@ -73,24 +65,27 @@ class ExtensionConfig(BaseModel):
 class CapabilitiesConfig(BaseModel):
     """Declares which A2A protocol features this agent supports.
 
-    All capabilities default to False (opt-in). Supported features:
-    streaming, push_notifications, state_transition_history,
-    extended_agent_card, extensions.
+    All capabilities default to False (opt-in). ``extensions`` accepts raw
+    v03 ``AgentExtension`` objects for back-compat; ``ExtensionConfig``
+    objects on ``AgentCardConfig.extensions`` are the newer idiomatic path.
     """
 
     streaming: bool = False
     push_notifications: bool = False
     state_transition_history: bool = False
     extended_agent_card: bool = False
-    extensions: list[AgentExtension] | None = None
+    extensions: list[v03.AgentExtension] | None = None
 
 
 class AgentCardConfig(BaseModel):
-    """User-friendly configuration for building an AgentCard."""
+    """User-friendly configuration for building an AgentCard (version-neutral)."""
 
     name: str
     description: str
     version: str = "1.0.0"
+    # Wire-level protocol version advertised on the card. For v0.3 cards this
+    # ends up as the top-level ``protocolVersion``; for v1.0 cards it is
+    # carried per-interface inside ``supportedInterfaces[]``.
     protocol_version: str = "0.3.0"
     skills: list[SkillConfig] = Field(default_factory=list)
     extensions: list[ExtensionConfig] = Field(default_factory=list)
@@ -104,22 +99,18 @@ class AgentCardConfig(BaseModel):
     input_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
     output_modes: list[str] = Field(default_factory=lambda: ["application/json", "text/plain"])
 
-    # P1
     provider: ProviderConfig | None = None
-    security_schemes: dict[str, SecurityScheme] | None = None
+    security_schemes: dict[str, v03.SecurityScheme] | None = None
     security: list[dict[str, list[str]]] | None = None
 
-    # P2
     icon_url: str | None = None
     documentation_url: str | None = None
 
-    # P3
     signatures: list[SignatureConfig] | None = None
 
 
-def _to_agent_skill(skill: SkillConfig) -> AgentSkill:
-    """Convert a SkillConfig to the A2A AgentSkill type."""
-    return AgentSkill(
+def _to_v03_agent_skill(skill: SkillConfig) -> v03.AgentSkill:
+    return v03.AgentSkill(
         id=skill.id,
         name=skill.name,
         description=skill.description,
@@ -131,18 +122,17 @@ def _to_agent_skill(skill: SkillConfig) -> AgentSkill:
     )
 
 
-def _to_agent_extension(ext: ExtensionConfig) -> AgentExtension:
-    """Convert an ExtensionConfig to the A2A AgentExtension type."""
-    return AgentExtension(
+def _to_v03_extension(ext: ExtensionConfig) -> v03.AgentExtension:
+    return v03.AgentExtension(
         uri=ext.uri,
         description=ext.description,
-        required=ext.required or None,  # omit False from serialization
+        required=ext.required or None,
         params=ext.params or None,
     )
 
 
 def validate_protocol(protocol: str) -> str:
-    """Validate the protocol string, raising ValueError for unsupported values."""
+    """Validate the ``protocol`` binding, raising for unsupported values."""
     supported = ["http+json", "jsonrpc"]
     if protocol == "grpc":
         msg = f"Protocol 'grpc' is not yet supported by a2akit. Supported protocols: {supported}"
@@ -153,46 +143,41 @@ def validate_protocol(protocol: str) -> str:
     return protocol
 
 
-def build_agent_card(
+def build_agent_card_v03(
     config: AgentCardConfig,
     base_url: str,
     additional_protocols: list[str] | None = None,
-) -> AgentCard:
-    """Build a full AgentCard from user config and the runtime base URL."""
+) -> v03.AgentCard:
+    """Build a v0.3 AgentCard."""
     stripped = base_url.rstrip("/")
     if config.protocol == "jsonrpc":
         agent_url = stripped
-        transport = TransportProtocol.jsonrpc
+        transport = v03.TransportProtocol.jsonrpc
     else:
         agent_url = f"{stripped}/v1"
-        transport = TransportProtocol.http_json
+        transport = v03.TransportProtocol.http_json
 
-    # Build additional_interfaces from additional_protocols (excludes primary)
-    additional_interfaces: list[AgentInterface] = []
+    additional_interfaces: list[v03.AgentInterface] = []
     for proto in additional_protocols or []:
         normalized = proto.lower().replace(" ", "")
-        if normalized in ("jsonrpc",) and transport != TransportProtocol.jsonrpc:
+        if normalized == "jsonrpc" and transport != v03.TransportProtocol.jsonrpc:
             additional_interfaces.append(
-                AgentInterface(url=stripped, transport=TransportProtocol.jsonrpc)
+                v03.AgentInterface(url=stripped, transport=v03.TransportProtocol.jsonrpc)
             )
         elif (
             normalized in ("http+json", "http", "rest")
-            and transport != TransportProtocol.http_json
+            and transport != v03.TransportProtocol.http_json
         ):
             additional_interfaces.append(
-                AgentInterface(url=f"{stripped}/v1", transport=TransportProtocol.http_json)
+                v03.AgentInterface(url=f"{stripped}/v1", transport=v03.TransportProtocol.http_json)
             )
 
     caps = config.capabilities
-
-    # Merge extensions from both config.extensions (ExtensionConfig objects
-    # that get converted) and config.capabilities.extensions (raw
-    # AgentExtension objects passed through directly).
-    merged_extensions: list[AgentExtension] = [_to_agent_extension(e) for e in config.extensions]
+    merged_extensions: list[v03.AgentExtension] = [_to_v03_extension(e) for e in config.extensions]
     if caps.extensions:
         merged_extensions.extend(caps.extensions)
 
-    return AgentCard(
+    return v03.AgentCard(
         protocol_version=config.protocol_version,
         name=config.name,
         description=config.description,
@@ -200,7 +185,7 @@ def build_agent_card(
         preferred_transport=transport,
         additional_interfaces=additional_interfaces or None,
         version=config.version,
-        capabilities=AgentCapabilities(
+        capabilities=v03.AgentCapabilities(
             extensions=merged_extensions or None,
             streaming=caps.streaming,
             push_notifications=caps.push_notifications,
@@ -208,9 +193,9 @@ def build_agent_card(
         ),
         default_input_modes=config.input_modes,
         default_output_modes=config.output_modes,
-        skills=[_to_agent_skill(s) for s in config.skills],
+        skills=[_to_v03_agent_skill(s) for s in config.skills],
         supports_authenticated_extended_card=config.supports_authenticated_extended_card,
-        provider=AgentProvider(
+        provider=v03.AgentProvider(
             organization=config.provider.organization,
             url=config.provider.url,
         )
@@ -221,7 +206,7 @@ def build_agent_card(
         security_schemes=config.security_schemes,
         security=config.security,
         signatures=[
-            AgentCardSignature(
+            v03.AgentCardSignature(
                 protected=s.protected,
                 signature=s.signature,
                 header=s.header,
@@ -233,6 +218,165 @@ def build_agent_card(
     )
 
 
+def _binding_for_protocol(protocol: str) -> str:
+    """Map the a2akit protocol shorthand to a v10 ``protocol_binding`` string."""
+    normalized = protocol.lower().replace(" ", "")
+    if normalized == "jsonrpc":
+        return "JSONRPC"
+    if normalized in ("http+json", "http", "rest"):
+        return "HTTP+JSON"
+    if normalized == "grpc":
+        return "GRPC"
+    raise ValueError(f"Unsupported protocol binding for v1.0 card: {protocol!r}")
+
+
+def _to_v10_agent_skill(skill: SkillConfig) -> v10.AgentSkill:
+    return v10.AgentSkill(
+        id=skill.id,
+        name=skill.name,
+        description=skill.description,
+        tags=list(skill.tags),
+        examples=list(skill.examples or []),
+        input_modes=list(skill.input_modes or []),
+        output_modes=list(skill.output_modes or []),
+    )
+
+
+def _to_v10_extension(ext: ExtensionConfig) -> v10.AgentExtension:
+    return v10.AgentExtension(
+        uri=ext.uri,
+        description=ext.description or "",
+        required=bool(ext.required),
+        params=v10.Struct.model_validate(ext.params) if ext.params else None,
+    )
+
+
+def build_agent_card_v10(
+    config: AgentCardConfig,
+    base_url: str,
+    additional_protocols: list[str] | None = None,
+) -> v10.AgentCard:
+    """Build a v1.0 AgentCard.
+
+    v1.0 dropped the top-level ``url`` / ``preferred_transport`` /
+    ``additional_interfaces`` in favor of a single ``supported_interfaces[]``
+    list. Each entry carries its own ``protocol_binding`` and
+    ``protocol_version``.
+    """
+    stripped = base_url.rstrip("/")
+
+    primary_binding = _binding_for_protocol(config.protocol)
+    supported: list[v10.AgentInterface] = [
+        v10.AgentInterface(
+            protocol_binding=primary_binding,
+            protocol_version="1.0",
+            url=stripped if primary_binding == "JSONRPC" else f"{stripped}",
+            tenant="",
+        )
+    ]
+    for proto in additional_protocols or []:
+        try:
+            binding = _binding_for_protocol(proto)
+        except ValueError:
+            continue
+        if binding == primary_binding:
+            continue
+        supported.append(
+            v10.AgentInterface(
+                protocol_binding=binding,
+                protocol_version="1.0",
+                url=stripped,
+                tenant="",
+            )
+        )
+
+    caps = config.capabilities
+    # v1.0 wraps the extension set on AgentCapabilities. Merge both the v0.3
+    # compat passthrough (raw objects on caps.extensions) and the newer
+    # ExtensionConfig objects on the top-level config.
+    merged_extensions: list[v10.AgentExtension] = [_to_v10_extension(e) for e in config.extensions]
+    if caps.extensions:
+        for ext_v03 in caps.extensions:
+            merged_extensions.append(
+                v10.AgentExtension(
+                    uri=ext_v03.uri,
+                    description=ext_v03.description or "",
+                    required=bool(ext_v03.required),
+                    params=(v10.Struct.model_validate(ext_v03.params) if ext_v03.params else None),
+                )
+            )
+
+    # Security schemes on v10 use a different envelope shape. Passing through
+    # the v03 SecurityScheme objects would lose fidelity; keep it out for
+    # now — full translation lands with section 21 when the library ships
+    # the full v03→v10 converter.
+    security_requirements: list[v10.SecurityRequirement] = []
+    for entry in config.security or []:
+        requirement_schemes: dict[str, v10.StringList] = {}
+        for name, scopes in entry.items():
+            requirement_schemes[name] = v10.StringList(strings=list(scopes))
+        security_requirements.append(v10.SecurityRequirement(schemes=requirement_schemes))
+
+    return v10.AgentCard(
+        name=config.name,
+        description=config.description,
+        version=config.version,
+        provider=(
+            v10.AgentProvider(
+                organization=config.provider.organization,
+                url=config.provider.url,
+            )
+            if config.provider
+            else None
+        ),
+        capabilities=v10.AgentCapabilities(
+            streaming=caps.streaming,
+            push_notifications=caps.push_notifications,
+            extended_agent_card=caps.extended_agent_card
+            or config.supports_authenticated_extended_card,
+            extensions=merged_extensions or [],
+        ),
+        default_input_modes=list(config.input_modes),
+        default_output_modes=list(config.output_modes),
+        supported_interfaces=supported,
+        skills=[_to_v10_agent_skill(s) for s in config.skills],
+        icon_url=config.icon_url or "",
+        documentation_url=config.documentation_url or "",
+        security_requirements=security_requirements,
+        security_schemes={},
+        signatures=[
+            v10.AgentCardSignature(
+                protected=s.protected,
+                signature=s.signature,
+                header=(v10.Struct.model_validate(s.header) if s.header else None),
+            )
+            for s in (config.signatures or [])
+        ],
+    )
+
+
+def build_agent_card(
+    config: AgentCardConfig,
+    base_url: str,
+    additional_protocols: list[str] | None = None,
+    *,
+    protocol_version: ProtocolVersion | str | None = None,
+) -> v03.AgentCard | v10.AgentCard:
+    """Build an AgentCard for the configured wire version.
+
+    ``protocol_version`` is a single :class:`ProtocolVersion` (or string
+    form). ``None`` defaults to v1.0 (spec §6).
+    """
+    version = (
+        protocol_version
+        if isinstance(protocol_version, ProtocolVersion)
+        else ProtocolVersion.parse(protocol_version)
+    )
+    if version == ProtocolVersion.V1_0:
+        return build_agent_card_v10(config, base_url, additional_protocols)
+    return build_agent_card_v03(config, base_url, additional_protocols)
+
+
 def external_base_url(headers: dict[str, str], scheme: str, netloc: str) -> str:
     """Derive the external base URL from request headers (proxy-aware)."""
     resolved_scheme = (headers.get("x-forwarded-proto") or scheme).split(",")[0].strip()
@@ -240,3 +384,18 @@ def external_base_url(headers: dict[str, str], scheme: str, netloc: str) -> str:
         (headers.get("x-forwarded-host") or headers.get("host") or netloc).split(",")[0].strip()
     )
     return f"{resolved_scheme}://{resolved_host}"
+
+
+__all__ = [
+    "AgentCardConfig",
+    "CapabilitiesConfig",
+    "ExtensionConfig",
+    "ProviderConfig",
+    "SignatureConfig",
+    "SkillConfig",
+    "build_agent_card",
+    "build_agent_card_v03",
+    "build_agent_card_v10",
+    "external_base_url",
+    "validate_protocol",
+]

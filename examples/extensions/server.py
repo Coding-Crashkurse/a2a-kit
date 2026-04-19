@@ -28,21 +28,20 @@ server = A2AServer(
         description="Agent that declares protocol extensions.",
         version="0.1.0",
         protocol="http+json",
-        capabilities=CapabilitiesConfig(
-            extensions=[
-                ExtensionConfig(
-                    uri="urn:example:custom-logging",
-                    description="Custom structured logging extension",
-                    params={"log_level": "debug", "format": "json"},
-                ),
-                ExtensionConfig(
-                    uri="urn:example:rate-limiting",
-                    description="Rate limiting metadata",
-                    required=False,
-                    params={"max_requests_per_minute": 60},
-                ),
-            ],
-        ),
+        capabilities=CapabilitiesConfig(),
+        extensions=[
+            ExtensionConfig(
+                uri="urn:example:custom-logging",
+                description="Custom structured logging extension",
+                params={"log_level": "debug", "format": "json"},
+            ),
+            ExtensionConfig(
+                uri="urn:example:rate-limiting",
+                description="Rate limiting metadata",
+                required=False,
+                params={"max_requests_per_minute": 60},
+            ),
+        ],
     ),
 )
 app = server.as_fastapi_app(debug=True)

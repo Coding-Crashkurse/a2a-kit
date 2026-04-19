@@ -3,10 +3,15 @@
 The A2AClient does not yet expose acceptedOutputModes, so this example
 uses httpx directly to show the raw HTTP requests.
 
-Start the output negotiation server first:
+Uses A2A v1.0 wire: bare ``/message:send`` path, flat ``Part`` shape,
+uppercase ``ROLE_USER`` role, ``SendMessageResponse`` oneof wrapper.
+
+Start the output negotiation server first::
+
     uvicorn examples.output_negotiation.server:app
 
-Then run this client:
+Then run this client::
+
     python -m examples.output_negotiation.client
 """
 
@@ -19,12 +24,12 @@ import httpx
 def _make_body(text: str, output_modes: list[str]) -> dict:
     return {
         "message": {
-            "role": "user",
+            "role": "ROLE_USER",
             "messageId": str(uuid.uuid4()),
-            "parts": [{"kind": "text", "text": text}],
+            "parts": [{"text": text}],
         },
         "configuration": {
-            "blocking": True,
+            "returnImmediately": False,
             "acceptedOutputModes": output_modes,
         },
     }
@@ -37,11 +42,13 @@ async def main():
 
         for mode in ["application/json", "text/csv", "text/plain"]:
             resp = await client.post(
-                "/v1/message:send",
+                "/message:send",
                 json=_make_body("report", [mode]),
             )
-            data = resp.json()
-            parts = data.get("artifacts", [{}])[0].get("parts", [])
+            body = resp.json()
+            # v1.0 SendMessageResponse oneof: {"task": ...} or {"message": ...}.
+            task = body.get("task", body)
+            parts = task.get("artifacts", [{}])[0].get("parts", [])
             text = parts[0].get("text", parts[0].get("data", "")) if parts else "(empty)"
             print(f"[{mode}]\n  {text}\n")
 

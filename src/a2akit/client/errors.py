@@ -67,3 +67,27 @@ class ProtocolError(A2AClientError):
     def __init__(self, description: str) -> None:
         super().__init__(f"Protocol error: {description}")
         self.description = description
+
+
+class ProtocolVersionMismatchError(A2AClientError):
+    """Server rejected the client's A2A wire version.
+
+    Raised when the server's ``/.well-known/agent-card.json`` announces a
+    protocol version the client's transport doesn't speak, or when a
+    request is rejected with HTTP 400 carrying the ``UNSUPPORTED_VERSION``
+    reason (v0.3 JSON-RPC code ``-32009``, v1.0 ``google.rpc.Status`` with
+    status ``INVALID_ARGUMENT``). ``client_version`` is what the client sent
+    (or inferred from the card), ``server_version`` is what the server
+    advertises / accepts.
+    """
+
+    def __init__(self, client_version: str, server_version: str, detail: str = "") -> None:
+        msg = (
+            f"A2A protocol version mismatch: client={client_version!r}, server={server_version!r}"
+        )
+        if detail:
+            msg += f" — {detail}"
+        super().__init__(msg)
+        self.client_version = client_version
+        self.server_version = server_version
+        self.detail = detail

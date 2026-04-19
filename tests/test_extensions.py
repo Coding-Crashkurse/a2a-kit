@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import httpx
-from a2a.types import AgentExtension
+from a2a_pydantic.v03 import AgentExtension
 from asgi_lifespan import LifespanManager
 
 from a2akit import (
@@ -100,13 +100,14 @@ def test_build_agent_card_with_extensions():
     assert len(exts) == 2
     assert exts[0].uri == "urn:example:logging"
     assert exts[0].description == "Logging ext"
-    assert exts[0].params == {"level": "debug"}
+    # In v10 cards params is a proto Struct — compare via model_dump for robustness
+    assert dict(exts[0].params) == {"level": "debug"}
     assert exts[1].uri == "urn:example:metrics"
     assert exts[1].required is True
 
 
 def test_build_agent_card_without_extensions():
-    """Default config results in card.capabilities.extensions being None."""
+    """Default config results in card.capabilities.extensions being empty."""
     config = AgentCardConfig(
         name="Test",
         description="Test agent",
@@ -114,7 +115,7 @@ def test_build_agent_card_without_extensions():
     )
     card = build_agent_card(config, "http://localhost:8000")
     assert card.capabilities is not None
-    assert card.capabilities.extensions is None
+    assert not card.capabilities.extensions
 
 
 async def test_extensions_visible_in_agent_card_http():

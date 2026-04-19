@@ -7,23 +7,28 @@ import uuid
 from typing import TYPE_CHECKING, Any, Self, TypeVar
 
 import httpx
-from a2a.types import (
+from a2a_pydantic.v03 import (
     AgentCapabilities,
     AgentCard,
     Message,
     MessageSendConfiguration,
     MessageSendParams,
     Part,
+    PushNotificationConfig,
     Role,
     Task,
     TextPart,
     TransportProtocol,
 )
 
+# Re-exported above from ``a2a_pydantic.v03``. Spec §4 step 3 adds dedicated
+# v1.0 client transports; the client keeps a v03-shaped view today so it
+# interoperates with the v0.3 compat layer on the server side.
 from a2akit.client.errors import (
     AgentCapabilityError,
     AgentNotFoundError,
     NotConnectedError,
+    ProtocolVersionMismatchError,
 )
 from a2akit.client.result import ClientResult, ListResult, StreamEvent
 from a2akit.client.transport.jsonrpc import JsonRpcTransport
@@ -43,6 +48,62 @@ if TYPE_CHECKING:
     from a2akit.client.transport.base import Transport
 
 _T = TypeVar("_T")
+
+
+def _project_v10_card_to_v03(v10_card: Any) -> AgentCard:
+    """Build a v0.3 AgentCard view from a parsed v1.0 AgentCard.
+
+    Used so existing callers that read ``client.agent_card.url`` and
+    ``client.agent_card.additional_interfaces`` keep working even when the
+    server sent a v1.0 card. Not a full conversion — only the fields the
+    rest of the client reads.
+    """
+    from a2a_pydantic.v03 import (
+        AgentCapabilities as V03Capabilities,
+    )
+    from a2a_pydantic.v03 import (
+        AgentInterface as V03Interface,
+    )
+    from a2a_pydantic.v03 import (
+        TransportProtocol as V03Transport,
+    )
+
+    ifaces = list(v10_card.supported_interfaces or [])
+    primary = ifaces[0] if ifaces else None
+    primary_url = (primary.url if primary else "") or ""
+    primary_binding = (primary.protocol_binding if primary else "HTTP+JSON") or "HTTP+JSON"
+    binding_upper = primary_binding.upper()
+    transport = V03Transport.jsonrpc if binding_upper == "JSONRPC" else V03Transport.http_json
+
+    additional: list[V03Interface] = []
+    for iface in ifaces[1:]:
+        add_t = (
+            V03Transport.jsonrpc
+            if (iface.protocol_binding or "").upper() == "JSONRPC"
+            else V03Transport.http_json
+        )
+        additional.append(V03Interface(url=iface.url or primary_url, transport=add_t))
+
+    caps = v10_card.capabilities
+    return AgentCard(
+        protocol_version="1.0.0",
+        name=v10_card.name,
+        description=v10_card.description,
+        url=primary_url,
+        preferred_transport=transport,
+        additional_interfaces=additional or None,
+        version=v10_card.version,
+        capabilities=V03Capabilities(
+            streaming=caps.streaming if caps else False,
+            push_notifications=caps.push_notifications if caps else False,
+        ),
+        default_input_modes=list(v10_card.default_input_modes or []),
+        default_output_modes=list(v10_card.default_output_modes or []),
+        skills=[],
+        supports_authenticated_extended_card=bool(
+            caps and getattr(caps, "extended_agent_card", False)
+        ),
+    )
 
 
 class A2AClient:
@@ -71,6 +132,13 @@ class A2AClient:
             httpx.ConnectTimeout,
             httpx.ReadTimeout,
         ),
+        # Spec §19 — JWS signature verification on the discovery card.
+        # ``"off"``: skip; ``"soft"`` (default): verify if present, warn on
+        # missing; ``"strict"``: require at least one verifiable signature.
+        verify_signatures: str = "soft",
+        trusted_signing_keys: list[Any] | None = None,
+        allow_jku_fetch: bool = True,
+        allowed_jku_hosts: set[str] | None = None,
     ) -> None:
         self._url = url.rstrip("/")
         self._headers = headers or {}
@@ -83,10 +151,20 @@ class A2AClient:
         self._transport: Transport | None = None
         self._connected = False
         self._active_protocol: str = ""
+        self._active_wire_version: str = "0.3"
         # Retry config
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._retry_on = retry_on
+        # Signature-verification config
+        if verify_signatures not in ("off", "soft", "strict"):
+            raise ValueError(
+                f"verify_signatures must be 'off', 'soft', or 'strict' (got {verify_signatures!r})"
+            )
+        self._verify_signatures = verify_signatures
+        self._trusted_signing_keys = trusted_signing_keys
+        self._allow_jku_fetch = allow_jku_fetch
+        self._allowed_jku_hosts = allowed_jku_hosts
 
     @traced_client_method(SPAN_CLIENT_CONNECT)
     async def connect(self) -> None:
@@ -113,9 +191,63 @@ class A2AClient:
 
         try:
             card_data = resp.json()
-            self._agent_card = AgentCard.model_validate(card_data)
         except Exception as exc:
             raise AgentNotFoundError(self._url, f"Invalid agent card: {exc}") from exc
+
+        # Pick between v10.AgentCard (has ``supportedInterfaces[]``) and
+        # v0.3 AgentCard (has top-level ``url`` + ``preferredTransport``).
+        # Store both decisions on the client so transport construction can
+        # pick the right client-side transport per interface.
+        self._card_v10: Any = None
+        if isinstance(card_data, dict) and "supportedInterfaces" in card_data:
+            try:
+                from a2a_pydantic.v10 import AgentCard as V10AgentCard
+
+                self._card_v10 = V10AgentCard.model_validate(card_data)
+            except Exception as exc:
+                raise AgentNotFoundError(self._url, f"Invalid v1.0 agent card: {exc}") from exc
+            # Also expose a v03-shaped view for existing callers that read
+            # ``self.agent_card.url`` / ``.additional_interfaces``. Build a
+            # best-effort v0.3 projection from the v1.0 card.
+            self._agent_card = _project_v10_card_to_v03(self._card_v10)
+        else:
+            try:
+                self._agent_card = AgentCard.model_validate(card_data)
+            except Exception as exc:
+                raise AgentNotFoundError(self._url, f"Invalid agent card: {exc}") from exc
+
+        # JWS signature verification (spec §19). Today the client parses v0.3
+        # AgentCards on the wire; when the native-v1.0 card arrives (see
+        # ``supportedInterfaces``), we verify with the a2akit._signatures
+        # helper. For v0.3 cards the library doesn't define a signatures
+        # field, so the check is a no-op unless the caller opts in explicitly.
+        if self._verify_signatures != "off":
+            sig_attr = getattr(self._agent_card, "signatures", None)
+            if sig_attr or self._verify_signatures == "strict":
+                try:
+                    from a2akit._signatures import (
+                        AgentCardSignatureError,
+                        verify_agent_card,
+                    )
+                except ImportError as exc:
+                    raise AgentNotFoundError(
+                        self._url,
+                        "Signature verification requires a2akit[signatures]. "
+                        "Install with: pip install a2akit[signatures]",
+                    ) from exc
+                try:
+                    verify_agent_card(
+                        self._agent_card,
+                        resp.content,
+                        mode=self._verify_signatures,
+                        trusted_keys=self._trusted_signing_keys,
+                        allow_jku=self._allow_jku_fetch,
+                        allowed_jku_hosts=self._allowed_jku_hosts,
+                    )
+                except AgentCardSignatureError as exc:
+                    raise AgentNotFoundError(
+                        self._url, f"Signature verification failed: {exc}"
+                    ) from exc
 
         if self._card_validator is not None:
             self._card_validator(self._agent_card, resp.content)
@@ -123,11 +255,34 @@ class A2AClient:
         # Build transport candidates: preferred first, then additionalInterfaces
         candidates = self._build_transport_candidates(self._agent_card)
 
+        # Pre-flight: the server publishes exactly one A2A wire version on its
+        # card. If none of the candidates speak a version this client supports
+        # ("0.3" or "1.0"), fail fast with a typed mismatch rather than letting
+        # the first request round-trip and get rejected.
+        supported = {"0.3", "1.0"}
+        card_versions = {wv for _, _, wv in candidates}
+        unspeakable = card_versions - supported
+        if card_versions and not (card_versions & supported):
+            raise ProtocolVersionMismatchError(
+                client_version="0.3|1.0",
+                server_version=",".join(sorted(card_versions)) or "unknown",
+                detail="Agent card advertises only unsupported A2A protocol versions.",
+            )
+        if unspeakable:
+            logger_msg = (
+                f"Ignoring unsupported interface versions on agent card: {sorted(unspeakable)}"
+            )
+            import logging
+
+            logging.getLogger(__name__).info(logger_msg)
+
         errors: list[tuple[str, str, Exception]] = []
         transport: Transport | None = None
-        for url, proto in candidates:
+        for url, proto, wire_version in candidates:
+            if wire_version not in supported:
+                continue
             try:
-                transport = self._create_transport(proto, url)
+                transport = self._create_transport(proto, url, wire_version=wire_version)
                 await transport.health_check()
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 errors.append((url, proto, exc))
@@ -147,6 +302,7 @@ class A2AClient:
 
             self._transport = transport
             self._active_protocol = proto
+            self._active_wire_version = wire_version
             self._connected = True
             return
 
@@ -158,23 +314,49 @@ class A2AClient:
         # Fallback: should not reach here, but just in case
         raise AgentNotFoundError(self._url, "No suitable transport found")
 
-    def _build_transport_candidates(self, card: AgentCard) -> list[tuple[str, str]]:
-        """Build ordered list of (url, protocol) transport candidates."""
-        candidates: list[tuple[str, str]] = []
+    def _build_transport_candidates(self, card: AgentCard) -> list[tuple[str, str, str]]:
+        """Build ordered list of ``(url, protocol, wire_version)`` candidates.
 
-        # Preferred transport first
+        ``wire_version`` is either ``"1.0"`` or ``"0.3"`` — picked from the
+        v1.0 ``supported_interfaces[]`` entry if the card is v1.0, else
+        always ``"0.3"``.
+        """
+        candidates: list[tuple[str, str, str]] = []
+
+        v10_card = getattr(self, "_card_v10", None)
+        if v10_card is not None:
+            # v1.0 card: iterate ``supported_interfaces[]`` preserving order.
+            for iface in v10_card.supported_interfaces or []:
+                proto = self._protocol_from_binding(iface.protocol_binding)
+                if proto:
+                    entry = (iface.url or self._url, proto, iface.protocol_version or "1.0")
+                    if entry not in candidates:
+                        candidates.append(entry)
+            if candidates:
+                return candidates
+
+        # v0.3 fallback (or v10 card with no usable interfaces).
         preferred_proto = self._detect_protocol(card)
-        candidates.append((card.url, preferred_proto))
+        candidates.append((card.url, preferred_proto, "0.3"))
 
-        # Additional interfaces as fallback
         for iface in card.additional_interfaces or []:
             proto = self._protocol_from_transport(iface.transport)
             if proto:
-                entry = (iface.url or card.url, proto)
+                entry = (iface.url or card.url, proto, "0.3")
                 if entry not in candidates:
                     candidates.append(entry)
 
         return candidates
+
+    @staticmethod
+    def _protocol_from_binding(binding: Any) -> str | None:
+        """Map a v1.0 ``protocol_binding`` string to our internal protocol name."""
+        val = str(binding).strip().upper()
+        if val == "HTTP+JSON":
+            return "http+json"
+        if val == "JSONRPC":
+            return "jsonrpc"
+        return None
 
     @staticmethod
     def _protocol_from_transport(transport: Any) -> str | None:
@@ -191,9 +373,17 @@ class A2AClient:
             return "jsonrpc"
         return None
 
-    def _create_transport(self, proto: str, url: str) -> Transport:
-        """Create a transport instance for the given protocol."""
+    def _create_transport(self, proto: str, url: str, *, wire_version: str = "0.3") -> Transport:
+        """Create a transport instance for the given protocol + wire version."""
         assert self._http_client is not None
+        if wire_version.startswith("1"):
+            if proto == "http+json":
+                from a2akit.client.transport.rest_v10 import RestV10Transport
+
+                return RestV10Transport(self._http_client, url)
+            from a2akit.client.transport.jsonrpc_v10 import JsonRpcV10Transport
+
+            return JsonRpcV10Transport(self._http_client, url)
         if proto == "http+json":
             return RestTransport(self._http_client, url)
         return JsonRpcTransport(self._http_client, url)
@@ -263,7 +453,8 @@ class A2AClient:
     @property
     def agent_name(self) -> str:
         """Shortcut for agent_card.name."""
-        return self.agent_card.name
+        name: str = self.agent_card.name
+        return name
 
     @property
     def capabilities(self) -> AgentCapabilities | None:
@@ -296,8 +487,6 @@ class A2AClient:
         If ``push_url`` is provided, a push notification config is sent
         inline with the message so the server registers it before processing.
         """
-        from a2a.types import PushNotificationConfig
-
         push_config: PushNotificationConfig | None = None
         if push_url:
             push_kwargs: dict[str, Any] = {"url": push_url}
@@ -546,9 +735,7 @@ class A2AClient:
         if metadata is not None:
             msg_kwargs["metadata"] = metadata
 
-        from a2a.types import Message as A2AMessage
-
-        message = A2AMessage(**msg_kwargs)
+        message = Message(**msg_kwargs)
 
         params_kwargs: dict[str, Any] = {"message": message}
         config_kwargs: dict[str, Any] = {}

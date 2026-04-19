@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+
+# Default to v0.3 wire across the legacy test suite. Framework default is
+# v1.0 per spec §2; tests pre-date that and hit ``/v1/`` paths. Tests that
+# want v1.0 behavior pass ``protocol_version=`` explicitly.
+os.environ.setdefault("A2AKIT_DEFAULT_PROTOCOL_VERSION", "0.3")
 
 from a2akit import (
     A2AServer,

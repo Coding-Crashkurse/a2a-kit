@@ -12,7 +12,7 @@ from a2akit.endpoints import _sanitize_task_for_client
 from a2akit.push.validation import validate_webhook_url
 
 if TYPE_CHECKING:
-    from a2a.types import Task
+    from a2a_pydantic import v10
 
     from a2akit.push.models import PushNotificationConfig, TaskPushNotificationConfig
 
@@ -57,7 +57,7 @@ class WebhookDeliveryService:
         self._http_client: httpx.AsyncClient | None = None
         # Per-config delivery queues ensure sequential ordering
         # Key: (task_id, config_id)
-        self._delivery_queues: dict[tuple[str, str], asyncio.Queue[Task | None]] = {}
+        self._delivery_queues: dict[tuple[str, str], asyncio.Queue[v10.Task | None]] = {}
         self._queue_workers: dict[tuple[str, str], asyncio.Task[None]] = {}
 
     async def startup(self) -> None:
@@ -101,7 +101,7 @@ class WebhookDeliveryService:
     async def deliver(
         self,
         configs: list[TaskPushNotificationConfig],
-        task: Task,
+        task: v10.Task,
     ) -> None:
         """Fan out delivery to all webhook configs for a task.
 
@@ -109,7 +109,7 @@ class WebhookDeliveryService:
         in order. Different configs are delivered in parallel.
         """
         for config in configs:
-            config_id = config.push_notification_config.id or "default"
+            config_id = config.id or "default"
             queue_key = (task.id, config_id)
 
             existing_worker = self._queue_workers.get(queue_key)
@@ -118,7 +118,7 @@ class WebhookDeliveryService:
                 # Clean up stale references and start fresh.
                 self._delivery_queues.pop(queue_key, None)
                 self._queue_workers.pop(queue_key, None)
-                queue: asyncio.Queue[Task | None] = asyncio.Queue()
+                queue: asyncio.Queue[v10.Task | None] = asyncio.Queue()
                 self._delivery_queues[queue_key] = queue
                 worker = asyncio.create_task(self._queue_worker(queue_key, queue, config))
                 self._queue_workers[queue_key] = worker
@@ -136,7 +136,7 @@ class WebhookDeliveryService:
     async def _queue_worker(
         self,
         key: tuple[str, str],
-        queue: asyncio.Queue[Task | None],
+        queue: asyncio.Queue[v10.Task | None],
         config: TaskPushNotificationConfig,
     ) -> None:
         """Process deliveries for one config sequentially."""
@@ -158,23 +158,28 @@ class WebhookDeliveryService:
                 queue.task_done()
 
             # Auto-cleanup after terminal state when queue is drained
+            # (v1.0 state values are uppercase: TASK_STATE_*)
             if queue.empty() and item.status:
                 state = (
                     item.status.state.value
                     if hasattr(item.status.state, "value")
                     else str(item.status.state)
                 )
-                if state in ("completed", "failed", "canceled", "rejected"):
+                if state in (
+                    "TASK_STATE_COMPLETED",
+                    "TASK_STATE_FAILED",
+                    "TASK_STATE_CANCELED",
+                    "TASK_STATE_REJECTED",
+                ):
                     break
 
     async def _deliver_single(
         self,
         config: TaskPushNotificationConfig,
-        task: Task,
+        task: v10.Task,
     ) -> None:
         """Deliver to a single webhook with retries."""
-        pnc = config.push_notification_config
-        url = pnc.url
+        url = config.url
 
         if not await validate_webhook_url(
             url,
@@ -186,7 +191,7 @@ class WebhookDeliveryService:
             return
 
         assert self._http_client is not None
-        headers = _build_headers(pnc)
+        headers = _build_headers(config)
         # Webhooks are external clients — strip framework-internal metadata
         # keys (``_idempotency_key``, ``_a2akit_direct_reply`` etc.) exactly
         # like REST/SSE responses do. Otherwise the webhook payload leaks
@@ -234,7 +239,7 @@ class WebhookDeliveryService:
         )
 
 
-def _build_headers(config: PushNotificationConfig) -> dict[str, str]:
+def _build_headers(config: TaskPushNotificationConfig | PushNotificationConfig) -> dict[str, str]:
     """Build HTTP headers for webhook delivery."""
     headers: dict[str, str] = {
         "Content-Type": "application/json",

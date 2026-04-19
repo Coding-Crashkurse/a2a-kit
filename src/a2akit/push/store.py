@@ -74,7 +74,10 @@ class InMemoryPushConfigStore(PushConfigStore):
         task_configs = self._store.setdefault(task_id, {})
         tpnc = TaskPushNotificationConfig(
             task_id=task_id,
-            push_notification_config=config,
+            id=config_id,
+            url=config.url,
+            token=config.token,
+            authentication=config.authentication,
         )
         task_configs[config_id] = tpnc
         return tpnc

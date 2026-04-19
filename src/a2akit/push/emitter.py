@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from a2akit.event_emitter import EventEmitter
 
 if TYPE_CHECKING:
-    from a2a.types import Message, TaskState
+    from a2a_pydantic import v10
 
     from a2akit.push.delivery import WebhookDeliveryService
     from a2akit.push.store import PushConfigStore
@@ -39,11 +39,11 @@ class PushDeliveryEmitter(EventEmitter):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState | None = None,
+        state: v10.TaskState | None = None,
         *,
-        status_message: Message | None = None,
+        status_message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
-        messages: list[Message] | None = None,
+        messages: list[v10.Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:

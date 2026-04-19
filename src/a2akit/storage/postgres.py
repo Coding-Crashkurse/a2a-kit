@@ -16,10 +16,14 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from a2a.types import Message, Task, TaskState
+from a2a_pydantic import v10
 
 from a2akit.storage._sql_base import SQLStorageBase, metadata_obj
-from a2akit.storage.base import _build_transition_record
+from a2akit.storage.base import (
+    META_CREATED_AT_KEY,
+    META_LAST_MODIFIED_KEY,
+    _build_transition_record,
+)
 
 
 class PostgreSQLStorage(SQLStorageBase[Any]):
@@ -77,15 +81,19 @@ class PostgreSQLStorage(SQLStorageBase[Any]):
         session: AsyncSession,
         task_id: str,
         context_id: str,
-        message: Message,
+        message: v10.Message,
         idempotency_key: str,
-    ) -> Task | None:
+    ) -> v10.Task | None:
         now = datetime.now(UTC).isoformat()
         history = self._serialize_messages([message])
         metadata_json = json.dumps(
             {
                 "_idempotency_key": idempotency_key,
-                "stateTransitions": [_build_transition_record(TaskState.submitted.value, now)],
+                "stateTransitions": [
+                    _build_transition_record(v10.TaskState.task_state_submitted.value, now)
+                ],
+                META_CREATED_AT_KEY: now,
+                META_LAST_MODIFIED_KEY: now,
             }
         )
 
@@ -103,7 +111,7 @@ class PostgreSQLStorage(SQLStorageBase[Any]):
             {
                 "id": task_id,
                 "context_id": context_id,
-                "status_state": TaskState.submitted.value,
+                "status_state": v10.TaskState.task_state_submitted.value,
                 "status_timestamp": now,
                 "history": history,
                 "metadata_json": metadata_json,

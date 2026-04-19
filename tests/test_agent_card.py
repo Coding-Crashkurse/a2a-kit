@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from a2a.types import HTTPAuthSecurityScheme
+from a2a_pydantic.v03 import HTTPAuthSecurityScheme
 from asgi_lifespan import LifespanManager
 
 from a2akit import (

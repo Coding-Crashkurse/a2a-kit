@@ -7,9 +7,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from a2a.types import Artifact, Message, Task, TaskState, TaskStatus
+from a2a_pydantic import v10
 
 from a2akit.storage.base import (
+    META_CREATED_AT_KEY,
+    META_LAST_MODIFIED_KEY,
+    META_TENANT_KEY,
     TERMINAL_STATES,
     ArtifactWrite,
     ConcurrencyError,
@@ -20,6 +23,9 @@ from a2akit.storage.base import (
     TaskNotFoundError,
     TaskTerminalStateError,
     _build_transition_record,
+    _coerce_v10_artifact,
+    _coerce_v10_message,
+    _coerce_v10_messages,
 )
 
 
@@ -28,14 +34,14 @@ class InMemoryStorage(Storage[ContextT]):
 
     def __init__(self) -> None:
         """Initialize empty task and context stores."""
-        self.tasks: dict[str, Task] = {}
+        self.tasks: dict[str, v10.Task] = {}
         self.contexts: dict[str, ContextT] = {}
         self._versions: dict[str, int] = {}
 
     @staticmethod
     def _trim_history(
-        history: list[Message] | None, history_length: int | None
-    ) -> list[Message] | None:
+        history: list[v10.Message] | None, history_length: int | None
+    ) -> list[v10.Message] | None:
         """Trim history to the last N messages.
 
         Returns the full history when ``history_length`` is ``None``.
@@ -55,7 +61,7 @@ class InMemoryStorage(Storage[ContextT]):
         history_length: int | None = None,
         *,
         include_artifacts: bool = True,
-    ) -> Task | None:
+    ) -> v10.Task | None:
         """Load a task by ID, optionally trimming history."""
         task = self.tasks.get(task_id)
         if not task:
@@ -63,22 +69,34 @@ class InMemoryStorage(Storage[ContextT]):
         t = copy.deepcopy(task)
         t.history = self._trim_history(t.history, history_length)
         if not include_artifacts:
-            t.artifacts = None
+            t.artifacts = []
         return t
 
     async def list_tasks(self, query: ListTasksQuery) -> ListTasksResult:
-        """Return filtered and paginated tasks."""
-        all_tasks = sorted(
-            self.tasks.values(),
-            key=lambda t: (t.status.timestamp or "", t.id),
-            reverse=True,
-        )
+        """Return filtered and paginated tasks.
 
-        filtered: list[Task] = []
+        v10 ``TaskStatus.timestamp`` is a Pydantic wrapper, not a plain
+        string. Sort by its string repr so comparisons stay total-orderable
+        even when the wrapper doesn't implement ``__lt__`` against itself.
+        """
+
+        def _sort_key(t: v10.Task) -> tuple[str, str]:
+            ts = t.status.timestamp
+            if ts is None:
+                return ("", t.id)
+            if hasattr(ts, "root"):
+                return (str(ts.root), t.id)
+            return (str(ts), t.id)
+
+        all_tasks = sorted(self.tasks.values(), key=_sort_key, reverse=True)
+
+        filtered: list[v10.Task] = []
         for t in all_tasks:
             if query.context_id and t.context_id != query.context_id:
                 continue
             if query.status and t.status.state != query.status:
+                continue
+            if query.tenant and (t.metadata or {}).get(META_TENANT_KEY) != query.tenant:
                 continue
             if (
                 query.status_timestamp_after
@@ -94,12 +112,12 @@ class InMemoryStorage(Storage[ContextT]):
             offset = 0
         page = filtered[offset : offset + query.page_size]
 
-        results: list[Task] = []
+        results: list[v10.Task] = []
         for t in page:
             t = copy.deepcopy(t)
             t.history = self._trim_history(t.history, query.history_length)
             if not query.include_artifacts:
-                t.artifacts = None
+                t.artifacts = []
             results.append(t)
 
         next_offset = offset + query.page_size
@@ -115,10 +133,10 @@ class InMemoryStorage(Storage[ContextT]):
     async def create_task(
         self,
         context_id: str,
-        message: Message,
+        message: v10.Message,
         *,
         idempotency_key: str | None = None,
-    ) -> Task:
+    ) -> v10.Task:
         """Create a brand-new task from an initial message.
 
         If ``idempotency_key`` is provided and a task with that key
@@ -127,12 +145,13 @@ class InMemoryStorage(Storage[ContextT]):
         ``_a2akit_just_created=True`` is set on the returned object
         (not persisted) — see the ABC contract in ``storage/base.py``.
         """
+        # Compat: accept v0.3 / a2a-sdk Message objects from legacy callers.
+        message = _coerce_v10_message(message)
         if idempotency_key:
             for t in self.tasks.values():
                 if (
                     t.context_id == context_id
-                    and t.metadata
-                    and t.metadata.get("_idempotency_key") == idempotency_key
+                    and (t.metadata or {}).get("_idempotency_key") == idempotency_key
                 ):
                     # Idempotent hit: return without the just-created marker.
                     return copy.deepcopy(t)
@@ -146,14 +165,15 @@ class InMemoryStorage(Storage[ContextT]):
         if idempotency_key:
             initial_meta["_idempotency_key"] = idempotency_key
         initial_meta["stateTransitions"] = [
-            _build_transition_record(TaskState.submitted.value, now),
+            _build_transition_record(v10.TaskState.task_state_submitted.value, now),
         ]
+        initial_meta[META_CREATED_AT_KEY] = now
+        initial_meta[META_LAST_MODIFIED_KEY] = now
 
-        task = Task(
+        task = v10.Task(
             id=task_id,
             context_id=context_id,
-            kind="task",
-            status=TaskStatus(state=TaskState.submitted, timestamp=now),
+            status=v10.TaskStatus(state=v10.TaskState.task_state_submitted, timestamp=now),
             history=[history_msg],
             artifacts=[],
             metadata=initial_meta,
@@ -165,10 +185,12 @@ class InMemoryStorage(Storage[ContextT]):
         # the transient just-created marker on the copy only so the stored
         # task stays clean.
         returned = copy.deepcopy(task)
+        # ``validate_assignment=True`` on v10.Task coerces the dict back to a
+        # Struct automatically (a2a-pydantic ≥0.0.6).
         returned.metadata = {**(returned.metadata or {}), "_a2akit_just_created": True}
         return returned
 
-    def _get_task_or_raise(self, task_id: str) -> Task:
+    def _get_task_or_raise(self, task_id: str) -> v10.Task:
         """Return the task or raise TaskNotFoundError."""
         task = self.tasks.get(task_id)
         if task is None:
@@ -178,11 +200,11 @@ class InMemoryStorage(Storage[ContextT]):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState | None = None,
+        state: v10.TaskState | None = None,
         *,
-        status_message: Message | None = None,
+        status_message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
-        messages: list[Message] | None = None,
+        messages: list[v10.Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:
@@ -197,6 +219,16 @@ class InMemoryStorage(Storage[ContextT]):
         that OCC logic in callers is exercised during development.
         Returns the new version after the write.
         """
+        # Compat: coerce v0.3 / sdk-shaped inputs to v10 for legacy callers.
+        if status_message is not None:
+            status_message = _coerce_v10_message(status_message)
+        if messages:
+            messages = _coerce_v10_messages(messages)
+        if artifacts:
+            artifacts = [
+                ArtifactWrite(_coerce_v10_artifact(aw.artifact), append=aw.append)
+                for aw in artifacts
+            ]
         task = self._get_task_or_raise(task_id)
 
         current_version = self._versions.get(task_id, 1)
@@ -222,39 +254,44 @@ class InMemoryStorage(Storage[ContextT]):
             for aw in artifacts:
                 self._apply_artifact(task, aw.artifact, append=aw.append)
 
-        if task_metadata:
-            if task.metadata is None:
-                task.metadata = {}
-            task.metadata.update(task_metadata)
+        # Always operate on a plain dict — v10.Task.metadata may be a Struct,
+        # a dict, or None depending on history of reassignments.
+        # Always work with a plain dict so setdefault / update have their
+        # normal Python semantics; Pydantic's validate_assignment re-wraps
+        # into Struct on write-back.
+        md: dict[str, Any] = dict(task.metadata or {})
 
+        if task_metadata:
+            md.update(task_metadata)
+
+        now = datetime.now(UTC).isoformat()
         if state is not None:
-            ts = datetime.now(UTC).isoformat()
-            task.status = TaskStatus(
+            task.status = v10.TaskStatus(
                 state=state,
-                timestamp=ts,
+                timestamp=now,
                 message=status_message,
             )
-            if task.metadata is None:
-                task.metadata = {}
-            task.metadata.setdefault("stateTransitions", []).append(
-                _build_transition_record(state.value, ts, status_message),
+            md.setdefault("stateTransitions", []).append(
+                _build_transition_record(state.value, now, status_message),
             )
+            md[META_LAST_MODIFIED_KEY] = now
         elif status_message is not None:
             # Update status message without a state transition (e.g. progress text)
-            task.status = TaskStatus(
+            task.status = v10.TaskStatus(
                 state=task.status.state,
-                timestamp=datetime.now(UTC).isoformat(),
+                timestamp=now,
                 message=status_message,
             )
+            md[META_LAST_MODIFIED_KEY] = now
+
+        task.metadata = md or None
 
         new_version = current_version + 1
         self._versions[task_id] = new_version
         return new_version
 
-    def _apply_artifact(self, task: Task, artifact: Artifact, *, append: bool) -> None:
+    def _apply_artifact(self, task: v10.Task, artifact: v10.Artifact, *, append: bool) -> None:
         """Apply a single artifact upsert to the task (in-place)."""
-        if task.artifacts is None:
-            task.artifacts = []
         existing_idx = next(
             (i for i, a in enumerate(task.artifacts) if a.artifact_id == artifact.artifact_id),
             None,

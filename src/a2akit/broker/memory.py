@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
     from types import TracebackType
 
-    from a2a.types import MessageSendParams
+    from a2a_pydantic import v10
     from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 
@@ -146,7 +146,7 @@ class InMemoryBroker(Broker):
 
     async def run_task(
         self,
-        params: MessageSendParams,
+        params: v10.SendMessageRequest,
         *,
         is_new_task: bool = False,
         request_context: dict[str, Any] | None = None,

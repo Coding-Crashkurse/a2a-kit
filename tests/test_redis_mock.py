@@ -11,37 +11,34 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from a2a.types import (
+from a2a_pydantic.v10 import (
     Message,
-    MessageSendParams,
     Part,
     Role,
+    SendMessageRequest,
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
-    TextPart,
 )
 
 from a2akit.config import Settings
 
 
-def _params(text: str = "hello") -> MessageSendParams:
+def _params(text: str = "hello") -> SendMessageRequest:
     msg = Message(
-        role=Role.user,
-        parts=[Part(root=TextPart(text=text))],
+        role=Role.role_user,
+        parts=[Part(text=text)],
         message_id="msg1",
     )
-    return MessageSendParams(message=msg)
+    return SendMessageRequest(message=msg)
 
 
 def _status_event(task_id: str = "t1", *, final: bool = False) -> TaskStatusUpdateEvent:
-    state = TaskState.completed if final else TaskState.working
+    state = TaskState.task_state_completed if final else TaskState.task_state_working
     return TaskStatusUpdateEvent(
         task_id=task_id,
         context_id="ctx-1",
-        kind="status-update",
         status=TaskStatus(state=state),
-        final=final,
     )
 
 
@@ -58,7 +55,7 @@ class TestBrokerSerialization:
         fields = {b"op": serialized.encode()}
         op = _deserialize_operation(fields)
         assert op.operation == "run"
-        assert op.params.message.parts[0].root.text == "roundtrip-test"
+        assert op.params.message.parts[0].text == "roundtrip-test"
         assert op.is_new_task is True
         assert op.request_context == {"user": "alice"}
 
@@ -98,45 +95,44 @@ class TestEventBusSerialization:
         serialized = _serialize_event(event)
         restored = _deserialize_event(serialized)
         assert isinstance(restored, TaskStatusUpdateEvent)
-        assert restored.status.state == TaskState.working
-        assert restored.final is False
+        assert restored.status.state == TaskState.task_state_working
 
     def test_final_status_roundtrip(self):
         from a2akit.event_bus.redis import _deserialize_event, _serialize_event
+        from a2akit.schema import TerminalMarker
 
-        event = _status_event("t1", final=True)
+        event = TerminalMarker(event=_status_event("t1", final=True))
         serialized = _serialize_event(event)
         restored = _deserialize_event(serialized)
-        assert isinstance(restored, TaskStatusUpdateEvent)
-        assert restored.final is True
+        assert isinstance(restored, TerminalMarker)
 
     def test_direct_reply_roundtrip(self):
         from a2akit.event_bus.redis import _deserialize_event, _serialize_event
         from a2akit.schema import DirectReply
 
         msg = Message(
-            role=Role.agent,
-            parts=[Part(root=TextPart(text="hello back"))],
+            role=Role.role_agent,
+            parts=[Part(text="hello back")],
             message_id="m1",
         )
         event = DirectReply(message=msg)
         serialized = _serialize_event(event)
         restored = _deserialize_event(serialized)
         assert isinstance(restored, DirectReply)
-        assert restored.message.parts[0].root.text == "hello back"
+        assert restored.message.parts[0].text == "hello back"
 
     def test_message_roundtrip(self):
         from a2akit.event_bus.redis import _deserialize_event, _serialize_event
 
         msg = Message(
-            role=Role.agent,
-            parts=[Part(root=TextPart(text="response"))],
+            role=Role.role_agent,
+            parts=[Part(text="response")],
             message_id="m2",
         )
         serialized = _serialize_event(msg)
         restored = _deserialize_event(serialized)
         assert isinstance(restored, Message)
-        assert restored.parts[0].root.text == "response"
+        assert restored.parts[0].text == "response"
 
     def test_unknown_type_raises(self):
         from a2akit.event_bus.redis import _deserialize_event
@@ -152,8 +148,9 @@ class TestEventBusSerialization:
 
     def test_is_final_true(self):
         from a2akit.event_bus.redis import _is_final
+        from a2akit.schema import TerminalMarker
 
-        assert _is_final(_status_event("t", final=True)) is True
+        assert _is_final(TerminalMarker(event=_status_event("t", final=True))) is True
 
     def test_is_final_false(self):
         from a2akit.event_bus.redis import _is_final
@@ -164,8 +161,8 @@ class TestEventBusSerialization:
         from a2akit.event_bus.redis import _is_final
 
         msg = Message(
-            role=Role.agent,
-            parts=[Part(root=TextPart(text="hi"))],
+            role=Role.role_agent,
+            parts=[Part(text="hi")],
             message_id="m1",
         )
         assert _is_final(msg) is False

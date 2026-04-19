@@ -34,13 +34,13 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from types import TracebackType
 
-    from a2a.types import MessageSendParams
+    from a2a_pydantic import v10
 
 logger = logging.getLogger(__name__)
 
 
 def _serialize_operation(
-    params: MessageSendParams,
+    params: v10.SendMessageRequest,
     *,
     is_new_task: bool,
     request_context: dict[str, Any],
@@ -62,12 +62,12 @@ def _serialize_operation(
 
 def _deserialize_operation(fields: dict[bytes, bytes]) -> _RunTask:
     """Deserialize a Redis stream entry into a TaskOperation."""
-    from a2a.types import MessageSendParams
+    from a2a_pydantic import v10
 
     raw = json.loads(fields[b"op"])
     return _RunTask(
         operation="run",
-        params=MessageSendParams.model_validate(raw["params"]),
+        params=v10.SendMessageRequest.model_validate(raw["params"]),
         is_new_task=raw.get("is_new_task", False),
         request_context=raw.get("request_context", {}),
     )
@@ -503,7 +503,7 @@ class RedisBroker(Broker):
 
     async def run_task(
         self,
-        params: MessageSendParams,
+        params: v10.SendMessageRequest,
         *,
         is_new_task: bool = False,
         request_context: dict[str, Any] | None = None,

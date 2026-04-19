@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from a2a.types import AgentCard, Message, MessageSendParams, Task
+from a2a_pydantic.v03 import AgentCard, Message, MessageSendParams, Task
 
 from a2akit.client.errors import (
     A2AClientError,
     ProtocolError,
+    ProtocolVersionMismatchError,
     TaskNotCancelableError,
     TaskNotFoundError,
     TaskTerminalError,
@@ -54,13 +55,19 @@ class RestTransport(Transport):
         try:
             body = response.json()
             if isinstance(body, dict):
-                raw = body.get("message", body.get("detail", ""))
-                if isinstance(raw, dict):
-                    code = raw.get("code")
-                    detail = str(raw.get("message", raw))
+                # v1.0 shape: {"error": {"code", "status", "message", "details"}}.
+                nested_err = body.get("error")
+                if isinstance(nested_err, dict):
+                    detail = str(nested_err.get("message", ""))
+                    code = nested_err.get("code")
                 else:
-                    detail = str(raw)
-                    code = body.get("code")
+                    raw = body.get("message", body.get("detail", ""))
+                    if isinstance(raw, dict):
+                        code = raw.get("code")
+                        detail = str(raw.get("message", raw))
+                    else:
+                        detail = str(raw)
+                        code = body.get("code")
         except Exception:
             detail = response.text or f"HTTP {status}"
 
@@ -74,6 +81,13 @@ class RestTransport(Transport):
                 raise TaskTerminalError(tid)
             raise A2AClientError(str(detail) or "Conflict (HTTP 409)")
         if status == 400:
+            # Server-side A2A-Version rejection (spec §3.6.2 — code -32009).
+            if code == -32009 or "Unsupported A2A version" in str(detail):
+                raise ProtocolVersionMismatchError(
+                    client_version=A2A_VERSION,
+                    server_version="0.3.x",
+                    detail=str(detail),
+                )
             raise A2AClientError(str(detail) or "Bad request")
         raise ProtocolError(f"HTTP {status}: {detail}")
 

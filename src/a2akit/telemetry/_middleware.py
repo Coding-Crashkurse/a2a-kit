@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from a2akit.middleware import A2AMiddleware
 from a2akit.telemetry._instruments import OTEL_ENABLED, get_tracer
 from a2akit.telemetry._semantic import (
+    ATTR_A2A_VERSION,
     ATTR_ARTIFACT_COUNT,
     ATTR_CONTEXT_ID,
     ATTR_MESSAGE_ID,
@@ -17,7 +18,7 @@ from a2akit.telemetry._semantic import (
 )
 
 if TYPE_CHECKING:
-    from a2a.types import Message, Task
+    from a2a_pydantic import v10
     from fastapi import Request
 
     from a2akit.middleware import RequestEnvelope
@@ -68,12 +69,21 @@ class TracingMiddleware(A2AMiddleware):
         # Non-message endpoints (tasks/get, tasks/cancel, push, extended card)
         # run the middleware pipeline for auth but carry no MessageSendParams.
         # Emit a span with path-derived attributes only.
+        # A2A version tag: :class:`A2AServer` sets ``app.state.protocol_version``
+        # to the single configured :class:`ProtocolVersion` during startup.
+        configured = getattr(request.app.state, "protocol_version", None)
+        resolved_version = envelope.context.get("a2a_version") or (
+            configured.value if configured is not None else None
+        )
+        attr_version = resolved_version or "1.0"
+
         if envelope.params is None:
             attributes: dict[str, Any] = {
                 ATTR_TASK_ID: "",
                 ATTR_CONTEXT_ID: "",
                 ATTR_MESSAGE_ID: "",
                 ATTR_METHOD: _detect_method(request),
+                ATTR_A2A_VERSION: attr_version,
             }
         else:
             msg = envelope.params.message
@@ -82,6 +92,7 @@ class TracingMiddleware(A2AMiddleware):
                 ATTR_CONTEXT_ID: msg.context_id or "",
                 ATTR_MESSAGE_ID: msg.message_id or "",
                 ATTR_METHOD: _detect_method(request),
+                ATTR_A2A_VERSION: attr_version,
             }
 
         span = tracer.start_span(
@@ -97,7 +108,7 @@ class TracingMiddleware(A2AMiddleware):
     async def after_dispatch(
         self,
         envelope: RequestEnvelope,
-        result: Task | Message | None = None,
+        result: v10.Task | v10.Message | None = None,
     ) -> None:
         """End the server span with result attributes."""
         span: Any = envelope.context.get("_otel_span")

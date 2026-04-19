@@ -11,9 +11,10 @@ from a2a.types import (
     Message,
     Part,
     Role,
-    TaskState,
     TextPart,
 )
+from a2a_pydantic.v10 import Role as V10Role
+from a2a_pydantic.v10 import TaskState
 
 from a2akit.storage.base import (
     ArtifactWrite,
@@ -48,7 +49,7 @@ async def test_create_and_load_task(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
     assert task.id
     assert task.context_id == "ctx-1"
-    assert task.status.state == TaskState.submitted
+    assert task.status.state == TaskState.task_state_submitted
 
     loaded = await sql_storage.load_task(task.id)
     assert loaded is not None
@@ -84,15 +85,15 @@ async def test_create_task_without_idempotency_key(sql_storage):
 
 async def test_update_state_transition(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
-    await sql_storage.update_task(task.id, state=TaskState.working)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_working)
     loaded = await sql_storage.load_task(task.id)
     assert loaded is not None
-    assert loaded.status.state == TaskState.working
+    assert loaded.status.state == TaskState.task_state_working
 
-    await sql_storage.update_task(task.id, state=TaskState.completed)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_completed)
     loaded = await sql_storage.load_task(task.id)
     assert loaded is not None
-    assert loaded.status.state == TaskState.completed
+    assert loaded.status.state == TaskState.task_state_completed
 
 
 async def test_update_appends_messages(sql_storage):
@@ -119,7 +120,7 @@ async def test_update_artifacts_replace(sql_storage):
     assert loaded is not None
     assert loaded.artifacts is not None
     assert len(loaded.artifacts) == 1
-    assert loaded.artifacts[0].parts[0].root.text == "v2"
+    assert loaded.artifacts[0].parts[0].text == "v2"
 
 
 async def test_update_artifacts_append(sql_storage):
@@ -151,23 +152,25 @@ async def test_update_merges_metadata(sql_storage):
 
 async def test_update_preserves_state_when_none(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
-    await sql_storage.update_task(task.id, state=TaskState.working)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_working)
     await sql_storage.update_task(task.id, task_metadata={"x": 1})
 
     loaded = await sql_storage.load_task(task.id)
     assert loaded is not None
-    assert loaded.status.state == TaskState.working
+    assert loaded.status.state == TaskState.task_state_working
 
 
 async def test_update_status_message_stored(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
     status_msg = _msg("status update")
-    await sql_storage.update_task(task.id, state=TaskState.working, status_message=status_msg)
+    await sql_storage.update_task(
+        task.id, state=TaskState.task_state_working, status_message=status_msg
+    )
 
     loaded = await sql_storage.load_task(task.id)
     assert loaded is not None
     assert loaded.status.message is not None
-    assert loaded.status.message.parts[0].root.text == "status update"
+    assert loaded.status.message.parts[0].text == "status update"
 
 
 # -- Terminal-State-Guard --
@@ -175,15 +178,15 @@ async def test_update_status_message_stored(sql_storage):
 
 async def test_terminal_state_blocks_transition(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
-    await sql_storage.update_task(task.id, state=TaskState.completed)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_completed)
 
     with pytest.raises(TaskTerminalStateError):
-        await sql_storage.update_task(task.id, state=TaskState.working)
+        await sql_storage.update_task(task.id, state=TaskState.task_state_working)
 
 
 async def test_terminal_state_allows_message_append(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
-    await sql_storage.update_task(task.id, state=TaskState.completed)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_completed)
 
     m2 = _msg("append")
     m2 = m2.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
@@ -194,10 +197,10 @@ async def test_terminal_state_allows_message_append(sql_storage):
 @pytest.mark.parametrize(
     "terminal_state",
     [
-        TaskState.completed,
-        TaskState.canceled,
-        TaskState.failed,
-        TaskState.rejected,
+        TaskState.task_state_completed,
+        TaskState.task_state_canceled,
+        TaskState.task_state_failed,
+        TaskState.task_state_rejected,
     ],
 )
 async def test_all_terminal_states_guarded(sql_storage, terminal_state):
@@ -205,7 +208,7 @@ async def test_all_terminal_states_guarded(sql_storage, terminal_state):
     await sql_storage.update_task(task.id, state=terminal_state)
 
     with pytest.raises(TaskTerminalStateError):
-        await sql_storage.update_task(task.id, state=TaskState.working)
+        await sql_storage.update_task(task.id, state=TaskState.task_state_working)
 
 
 # -- OCC --
@@ -216,14 +219,16 @@ async def test_version_increments_on_update(sql_storage):
     v1 = await sql_storage.get_version(task.id)
     assert v1 == 1
 
-    await sql_storage.update_task(task.id, state=TaskState.working)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_working)
     v2 = await sql_storage.get_version(task.id)
     assert v2 == 2
 
 
 async def test_expected_version_match_succeeds(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
-    version = await sql_storage.update_task(task.id, state=TaskState.working, expected_version=1)
+    version = await sql_storage.update_task(
+        task.id, state=TaskState.task_state_working, expected_version=1
+    )
     assert version == 2
 
 
@@ -231,7 +236,9 @@ async def test_expected_version_mismatch_raises(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
 
     with pytest.raises(ConcurrencyError):
-        await sql_storage.update_task(task.id, state=TaskState.working, expected_version=999)
+        await sql_storage.update_task(
+            task.id, state=TaskState.task_state_working, expected_version=999
+        )
 
 
 async def test_get_version_nonexistent_returns_none(sql_storage):
@@ -258,10 +265,10 @@ async def test_list_tasks_filter_by_context(sql_storage):
 
 async def test_list_tasks_filter_by_status(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
-    await sql_storage.update_task(task.id, state=TaskState.working)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_working)
     await sql_storage.create_task("ctx-1", _msg())
 
-    result = await sql_storage.list_tasks(ListTasksQuery(status=TaskState.working))
+    result = await sql_storage.list_tasks(ListTasksQuery(status=TaskState.task_state_working))
     assert len(result.tasks) == 1
 
 
@@ -297,7 +304,7 @@ async def test_list_tasks_exclude_artifacts(sql_storage):
     await sql_storage.update_task(task.id, artifacts=[ArtifactWrite(artifact=_artifact())])
 
     result = await sql_storage.list_tasks(ListTasksQuery(include_artifacts=False))
-    assert result.tasks[0].artifacts is None
+    assert not result.tasks[0].artifacts
 
 
 # -- history_length --
@@ -325,7 +332,7 @@ async def test_load_task_trimmed_history(sql_storage):
     assert loaded is not None
     assert loaded.history is not None
     assert len(loaded.history) == 1
-    assert loaded.history[0].parts[0].root.text == "second"
+    assert loaded.history[0].parts[0].text == "second"
 
 
 async def test_load_task_history_length_zero(sql_storage):
@@ -342,7 +349,7 @@ async def test_load_task_exclude_artifacts(sql_storage):
 
     loaded = await sql_storage.load_task(task.id, include_artifacts=False)
     assert loaded is not None
-    assert loaded.artifacts is None
+    assert not loaded.artifacts
 
 
 # -- delete --
@@ -402,8 +409,8 @@ async def test_message_roundtrip_preserves_fields(sql_storage):
     loaded = await sql_storage.load_task(task.id)
     assert loaded is not None
     assert loaded.history is not None
-    assert loaded.history[0].parts[0].root.text == "test message"
-    assert loaded.history[0].role == Role.user
+    assert loaded.history[0].parts[0].text == "test message"
+    assert loaded.history[0].role == V10Role.role_user
 
 
 async def test_artifact_roundtrip_preserves_parts(sql_storage):
@@ -415,7 +422,7 @@ async def test_artifact_roundtrip_preserves_parts(sql_storage):
     assert loaded is not None
     assert loaded.artifacts is not None
     assert loaded.artifacts[0].artifact_id == "art-1"
-    assert loaded.artifacts[0].parts[0].root.text == "content here"
+    assert loaded.artifacts[0].parts[0].text == "content here"
 
 
 async def test_metadata_roundtrip(sql_storage):
@@ -434,4 +441,4 @@ async def test_metadata_roundtrip(sql_storage):
 
 async def test_update_nonexistent_raises(sql_storage):
     with pytest.raises(TaskNotFoundError):
-        await sql_storage.update_task("does-not-exist", state=TaskState.working)
+        await sql_storage.update_task("does-not-exist", state=TaskState.task_state_working)

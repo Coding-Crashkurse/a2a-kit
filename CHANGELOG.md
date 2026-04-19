@@ -4,6 +4,158 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.0.35] — UNRELEASED (single-version servers, typed mismatch)
+
+### Removed
+- **Dual-protocol serving.** `A2AServer(protocol_version={"1.0", "0.3"})`
+  now raises `ValueError` at init — each server serves exactly one wire
+  version. Mixed-fleet users should run two `A2AServer` instances behind
+  a reverse proxy. Deleted `_dual_jsonrpc.py`, `_register_exception_
+  handlers_dual`, `include_v03_interfaces` card-builder mode,
+  `normalize_protocol_versions`, and the dual-mode integration tests.
+
+### Added
+- **`ProtocolVersionMismatchError`** (in `a2akit.client.errors`) raised
+  when the client can't speak a server's wire version — either because
+  the agent card advertises only unsupported versions, or because the
+  server rejects an `A2A-Version` header mismatch. All four client
+  transports (`RestTransport`, `JsonRpcTransport`, `RestV10Transport`,
+  `JsonRpcV10Transport`) map the server's 400-response envelopes to this
+  typed exception.
+- **Connect-time pre-flight** in `A2AClient.connect()` that rejects
+  agent cards advertising only unspeakable protocol versions without
+  making a round-trip.
+
+### Changed
+- `A2AServer.protocol_version` is now a single `ProtocolVersion` instead
+  of a set. `app.state.protocol_version` is exposed for telemetry.
+- `build_agent_card` / `build_discovery_router` take `protocol_version=`
+  (single) instead of `protocol_versions=` (iterable).
+- `build_agent_card_v10` drops the `include_v03_interfaces` kwarg.
+
+## [0.0.34] — UNRELEASED (A2A v1.0 migration complete)
+
+### Added
+- **Native A2A v1.0 wire stack** — `endpoints_v10.py` (bare-path REST
+  `/message:send`, `/tasks/{id}`, wrapped SSE discriminator) and
+  `jsonrpc_v10.py` (PascalCase `SendMessage`/`GetTask`/…). Framework
+  default is now v1.0; v0.3 lives under `/v1/` for legacy clients.
+- **Dual-protocol mode** (`protocol_version={"1.0", "0.3"}`) — same server
+  accepts both wire formats. REST disambiguates by path prefix; JSON-RPC
+  at shared `POST /` routes by method-name shape (slash = v0.3,
+  PascalCase = v1.0). `_dual_jsonrpc.py` stamps the per-request
+  `A2A-Version` so responses echo the right version on the shared endpoint.
+- **Agent-card signature verification** — detached JWS (RFC 7515) + JCS
+  canonicalization (RFC 8785). `A2AClient(verify_signatures="soft"|"strict"|"off")`
+  with optional trusted key list and JKU allow-list. Server-side gate via
+  `SignatureVerificationConfig`. Requires the `signatures` extra.
+- **`google.rpc.Status` error catalog** (`_errors_v10.py`) — 12 exception
+  types map to HTTP status + JSON-RPC code + gRPC status + `ErrorInfo.reason`.
+- **Native v1.0 client transports** — `RestV10Transport`, `JsonRpcV10Transport`
+  accept v03 `MessageSendParams` from the existing client API and convert
+  to/from the v1.0 wire shape transparently. `A2AClient` auto-detects
+  `supportedInterfaces[]` on the agent card and picks the right transport.
+- **Flat `TaskPushNotificationConfig`** — matches the v1.0 spec
+  (`{taskId, id, url, token, authentication}`). The legacy nested
+  `push_notification_config` accessor remains as a back-compat property
+  for existing code.
+
+### Changed
+- **Default `protocol_version` is now `"1.0"`.** Set
+  `A2AKIT_DEFAULT_PROTOCOL_VERSION=0.3` or pass `protocol_version="0.3"`
+  to `A2AServer` for legacy behavior.
+- v0.3 JSON-RPC push endpoints now serialize via `_serialize_tpnc_v03`
+  (nested shape on the wire); v1.0 endpoints use `_serialize_tpnc`
+  (flat shape on the wire). Internal representation is always flat.
+- `A2AClient` exposes `verify_signatures`, `trusted_signing_keys`,
+  `allow_jku_fetch`, `allowed_jku_hosts` kwargs.
+
+### Documentation
+- New **Protocol Versions guide** (`docs/guides/protocol-versions.md`)
+  covering single-version / dual-mode / client auto-detection /
+  signature verification.
+- README gains a Protocol Versions section and a full v0.3-vs-v1.0 wire
+  comparison.
+- Examples updated: `multi_transport`, `output_negotiation`,
+  `agent_card`, `extensions` now use v1.0 shapes in their docstrings and
+  sample bodies.
+
+## [0.0.33] — UNRELEASED (A2A v1.0 migration scaffolding)
+
+### Added
+- **A2A v1.0 scaffolding**: internal state is now `a2a_pydantic.v10`; v0.3
+  clients keep working via a compat layer that converts bodies at the wire
+  boundary.
+- **`ProtocolVersion` enum** and `A2AServer(..., protocol_version=...)` kwarg
+  (accepts `"1.0"`, `"0.3"`, or a set of both — spec §2).
+- **Version-aware AgentCard builder** — `build_agent_card_v10` emits the v1.0
+  `supported_interfaces[]` shape; `build_agent_card_v03` keeps the v0.3 shape.
+- **`RequestEnvelope.tenant`** — v1.0 multi-tenancy as a first-class
+  middleware attribute (§8).
+- **`ListTasksQuery.tenant`** filter, honored by all storage backends (§9).
+- **Uses `a2a_pydantic.convert_to_v10(...)` at the v0.3 wire boundary.**
+  Requires `a2a-pydantic>=0.0.9`. Three upstream releases (0.0.6 →
+  `convert_to_v10` + `validate_assignment`, 0.0.8 → Part input coercion
+  + sensible defaults, 0.0.9 → `Struct` as `MutableMapping`) let us
+  delete the `_v03_to_v10.py` module, all `build_*_part` helpers, and
+  the `meta_as_dict` / `meta_as_struct` wrappers respectively.
+- **`a2akit.a2a.version` OTel span attribute** (§12).
+- **`pytest-timeout`** in the dev extra.
+
+### Changed
+- **Internal types migrated to `a2a_pydantic.v10`** everywhere except the v0.3
+  compat wire endpoints and the v0.3 client (both deliberate).
+- **Event-pipeline terminal signalling** moved from the v0.3 `final=True` flag
+  to a `TerminalMarker` wrapper. The v0.3 compat layer still emits
+  `final=True` on the wire for legacy clients (§10).
+- **AgentCard builder** now takes `protocol_versions=` and dispatches between
+  v10 and v03.
+
+### Removed
+- **`a2a-sdk` is no longer a runtime dependency.** Kept in the `dev` group
+  only — legacy tests still construct v0.3 types directly; those will be
+  migrated in a follow-up sprint.
+- **`TaskState.unknown`** references: v0.3 sentinel, v1.0 drops it.
+
+### Breaking
+- **Database schemas from pre-0.0.33 a2akit** cannot be read by the new code
+  path — the JSON shape of `history` / `artifacts` columns changed. Drain
+  pending tasks and wipe the `a2akit_*` tables before upgrading. Auto-
+  migration is out of scope for this release (§3.4).
+- **User workers that accessed `ctx.parts[i].root.text` directly** must
+  migrate to `ctx.parts[i].text` (flat v10 Part). The idiomatic API
+  (`ctx.user_text`, `ctx.files`, `ctx.data_parts`) is unaffected.
+- **Tests that construct `a2a.types.Message` / `a2a.types.Task` and pass
+  them straight to storage or `TaskManager`** will fail — storage expects
+  `a2a_pydantic.v10` models now.
+
+### Added (continued)
+- **Native v1.0 wire endpoints (§5)**: `endpoints_v10.py` (REST, no `/v1/`
+  prefix, wrapped SSE discriminator, `google.rpc.Status` errors) and
+  `jsonrpc_v10.py` (PascalCase methods: `SendMessage`, `GetTask`,
+  `CreateTaskPushNotificationConfig`, …). 11 integration tests.
+- **`_errors_v10.py`** with exhaustive exception → descriptor catalog
+  feeding REST, JSON-RPC, and (future) gRPC — one source of truth for
+  HTTP/gRPC status / JSON-RPC code / reason string (§20).
+- **Dual-protocol serving (§17)**: `A2AServer(protocol_version={"1.0", "0.3"})`
+  mounts both router sets. REST distinguishes by path (v0.3 under `/v1/`,
+  v1.0 at root); JSON-RPC uses a method-name dispatcher
+  (`_dual_jsonrpc.py`) that routes PascalCase to v1.0 and slash-style to
+  v0.3. Errors shape switches per request path so each client sees its
+  native envelope. Agent Card advertises both. 7 integration tests.
+- **Agent Card JWS signature verification (§19)**: `_signatures.py` with
+  RFC 7515 detached JWS over RFC 8785 JCS canonicalization (excluding
+  ``signatures[]`` from the hash). Wired into ``A2AClient(..., verify_signatures=)``
+  with ``off`` / ``soft`` (default) / ``strict`` modes, trusted_keys
+  allowlist, jku-host allowlist. 8 tests covering valid-signature,
+  tampered-body, unknown-kid, jku-host enforcement.
+- **New optional extra** ``pip install a2akit[signatures]`` pulls
+  ``jwcrypto>=1.5`` and ``rfc8785>=0.1``.
+
+### Deferred to follow-up releases
+- Push model alignment (§7, low-value refactor), gRPC transport (§18),
+  full test-suite migration (§14).
+
 ## [0.0.32] — 2026-04-08
 
 ### Fixed

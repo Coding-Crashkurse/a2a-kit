@@ -8,11 +8,24 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
 import anyio
-from a2a.types import TaskStatusUpdateEvent
 
 from a2akit.config import Settings, get_settings
 from a2akit.event_bus.base import EventBus
-from a2akit.schema import StreamEvent
+from a2akit.schema import StreamEvent, TerminalMarker
+
+
+def _is_stream_terminal(ev: object) -> bool:
+    """True when an event signals the stream should close.
+
+    Primary signal is :class:`TerminalMarker`. Also accepts legacy v0.3
+    ``TaskStatusUpdateEvent`` objects with ``final=True`` so external callers
+    (e.g. tests in a v0.3 world) can still drive termination without being
+    aware of the wrapper type.
+    """
+    if isinstance(ev, TerminalMarker):
+        return True
+    return bool(getattr(ev, "final", False))
+
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -187,10 +200,10 @@ class InMemoryEventBus(EventBus):
                     if buffered.id > after_id:
                         yield (str(buffered.id), buffered.event)
                         last_yielded_id = buffered.id
-                        if (
-                            isinstance(buffered.event, TaskStatusUpdateEvent)
-                            and buffered.event.final
-                        ):
+                        # v1.0 drops the `final` flag; the internal pipeline
+                        # wraps terminal events in TerminalMarker so stream
+                        # consumers know when to close.
+                        if _is_stream_terminal(buffered.event):
                             return
 
         # Live phase: yield events from the subscription stream,
@@ -200,7 +213,7 @@ class InMemoryEventBus(EventBus):
             if eid_int <= last_yielded_id:
                 continue
             yield (event_id, ev)
-            if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
+            if _is_stream_terminal(ev):
                 break
 
     async def cleanup(self, task_id: str) -> None:

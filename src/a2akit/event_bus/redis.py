@@ -11,16 +11,11 @@ import logging
 from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any, Self
 
-from a2a.types import (
-    Message,
-    Task,
-    TaskArtifactUpdateEvent,
-    TaskStatusUpdateEvent,
-)
+from a2a_pydantic import v10
 
 from a2akit.config import Settings, get_settings
 from a2akit.event_bus.base import EventBus
-from a2akit.schema import DirectReply, StreamEvent
+from a2akit.schema import DirectReply, StreamEvent, TerminalMarker
 
 try:
     import redis.asyncio as aioredis
@@ -37,16 +32,56 @@ logger = logging.getLogger(__name__)
 
 
 def _serialize_event(event: StreamEvent) -> str:
-    """Serialize a StreamEvent to JSON."""
+    """Serialize a StreamEvent to JSON.
+
+    v10 models don't carry a `kind` discriminator, so we tag each wire payload
+    with a framework-internal ``_event_type`` so ``_deserialize_event`` knows
+    which model to reconstruct. ``DirectReply`` and ``TerminalMarker`` are
+    a2akit-internal wrappers that the spec explicitly excludes from the wire
+    shape — their existence is implementation detail of the event pipeline.
+    """
     if isinstance(event, DirectReply):
         return json.dumps(
             {
-                "_type": "DirectReply",
+                "_event_type": "direct_reply",
                 "message": event.message.model_dump(mode="json", by_alias=True, exclude_none=True),
             }
         )
-    if isinstance(event, Task | Message | TaskStatusUpdateEvent | TaskArtifactUpdateEvent):
-        return event.model_dump_json(by_alias=True, exclude_none=True)
+    if isinstance(event, TerminalMarker):
+        return json.dumps(
+            {
+                "_event_type": "terminal_marker",
+                "event": event.event.model_dump(mode="json", by_alias=True, exclude_none=True),
+            }
+        )
+    if isinstance(event, v10.TaskStatusUpdateEvent):
+        return json.dumps(
+            {
+                "_event_type": "status_update",
+                "event": event.model_dump(mode="json", by_alias=True, exclude_none=True),
+            }
+        )
+    if isinstance(event, v10.TaskArtifactUpdateEvent):
+        return json.dumps(
+            {
+                "_event_type": "artifact_update",
+                "event": event.model_dump(mode="json", by_alias=True, exclude_none=True),
+            }
+        )
+    if isinstance(event, v10.Task):
+        return json.dumps(
+            {
+                "_event_type": "task",
+                "task": event.model_dump(mode="json", by_alias=True, exclude_none=True),
+            }
+        )
+    if isinstance(event, v10.Message):
+        return json.dumps(
+            {
+                "_event_type": "message",
+                "message": event.model_dump(mode="json", by_alias=True, exclude_none=True),
+            }
+        )
     msg = f"Unknown event type: {type(event)}"
     raise TypeError(msg)
 
@@ -54,31 +89,26 @@ def _serialize_event(event: StreamEvent) -> str:
 def _deserialize_event(data: str) -> StreamEvent:
     """Deserialize a JSON string into a StreamEvent."""
     raw = json.loads(data)
-    _type = raw.get("_type")
-    if _type == "DirectReply":
-        return DirectReply(message=Message.model_validate(raw["message"]))
-    kind = raw.get("kind")
-    if kind == "status-update":
-        return TaskStatusUpdateEvent.model_validate(raw)
-    if kind == "artifact-update":
-        return TaskArtifactUpdateEvent.model_validate(raw)
-    # Task and Message don't have a 'kind' field — distinguish by structure
-    if "status" in raw and "id" in raw:
-        return Task.model_validate(raw)
-    if "role" in raw and "parts" in raw:
-        return Message.model_validate(raw)
-    # Fallback: try Task first
-    try:
-        return Task.model_validate(raw)
-    except Exception:
-        pass
-    msg = f"Cannot deserialize event: {data[:200]}"
+    tag = raw.get("_event_type")
+    if tag == "direct_reply":
+        return DirectReply(message=v10.Message.model_validate(raw["message"]))
+    if tag == "terminal_marker":
+        return TerminalMarker(event=v10.TaskStatusUpdateEvent.model_validate(raw["event"]))
+    if tag == "status_update":
+        return v10.TaskStatusUpdateEvent.model_validate(raw["event"])
+    if tag == "artifact_update":
+        return v10.TaskArtifactUpdateEvent.model_validate(raw["event"])
+    if tag == "task":
+        return v10.Task.model_validate(raw["task"])
+    if tag == "message":
+        return v10.Message.model_validate(raw["message"])
+    msg = f"Cannot deserialize event (unknown _event_type={tag!r}): {data[:200]}"
     raise ValueError(msg)
 
 
 def _is_final(event: StreamEvent) -> bool:
     """Check if an event signals the end of the stream."""
-    return isinstance(event, TaskStatusUpdateEvent) and event.final
+    return isinstance(event, TerminalMarker)
 
 
 class RedisEventBus(EventBus):

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import pytest
-from a2a.types import Message, Part, Role, TaskState, TextPart
+from a2a.types import Message, Part, Role, TextPart
+from a2a_pydantic.v10 import TaskState
 
 from a2akit.storage.base import ConcurrencyError, TaskTerminalStateError
 
@@ -23,7 +24,7 @@ async def test_create_task(storage):
 
     assert task.id, "Task must have a non-empty id"
     assert task.context_id == "ctx-1"
-    assert task.status.state == TaskState.submitted
+    assert task.status.state == TaskState.task_state_submitted
 
 
 async def test_load_task(storage):
@@ -46,20 +47,20 @@ async def test_load_task_not_found(storage):
 async def test_update_task_state(storage):
     """Updating a task's state persists the new state."""
     task = await storage.create_task("ctx-1", _msg())
-    await storage.update_task(task.id, state=TaskState.working)
+    await storage.update_task(task.id, state=TaskState.task_state_working)
 
     loaded = await storage.load_task(task.id)
     assert loaded is not None
-    assert loaded.status.state == TaskState.working
+    assert loaded.status.state == TaskState.task_state_working
 
 
 async def test_update_task_terminal_guard(storage):
     """Updating a task in a terminal state raises TaskTerminalStateError."""
     task = await storage.create_task("ctx-1", _msg())
-    await storage.update_task(task.id, state=TaskState.completed)
+    await storage.update_task(task.id, state=TaskState.task_state_completed)
 
     with pytest.raises(TaskTerminalStateError):
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
 
 async def test_update_task_occ(storage):
@@ -67,7 +68,9 @@ async def test_update_task_occ(storage):
     task = await storage.create_task("ctx-1", _msg())
 
     with pytest.raises(ConcurrencyError):
-        await storage.update_task(task.id, state=TaskState.working, expected_version=999)
+        await storage.update_task(
+            task.id, state=TaskState.task_state_working, expected_version=999
+        )
 
 
 async def test_history_length_trimming(storage):
@@ -81,7 +84,7 @@ async def test_history_length_trimming(storage):
     assert loaded is not None
     assert len(loaded.history) == 1
     # The last message should be the second one
-    text_part = loaded.history[0].parts[0].root
+    text_part = loaded.history[0].parts[0]
     assert text_part.text == "second"
 
 

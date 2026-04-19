@@ -47,21 +47,23 @@ uvicorn examples.streaming.server:app --reload
 
 ## Test it
 
-Use the streaming endpoint to see events arrive in real-time:
+Use the streaming endpoint to see events arrive in real-time. The framework defaults to A2A v1.0 — use the bare `/message:stream` path and v1.0 wire shape (`"role": "ROLE_USER"`, flat `parts`):
 
 ```bash
-curl -N -X POST http://localhost:8000/v1/message:stream \
+curl -N -X POST http://localhost:8000/message:stream \
   -H "Content-Type: application/json" \
-  -d '{"message":{"role":"user","parts":[{"text":"hello beautiful world"}],"messageId":"1"}}'
+  -d '{"message":{"role":"ROLE_USER","parts":[{"text":"hello beautiful world"}],"messageId":"1"}}'
 ```
+
+For v0.3 clients, pass `protocol_version="0.3"` to `A2AServer` and hit `/v1/message:stream` with `"role": "user"` instead.
 
 ## Expected output
 
 A stream of SSE events:
 
-1. Task snapshot with `state: submitted`
+1. Task snapshot with `state: TASK_STATE_SUBMITTED` (v1.0) / `submitted` (v0.3)
 2. Status update: "Streaming 3 words..."
 3. Artifact update: "hello " (append=false)
 4. Artifact update: "beautiful " (append=true)
 5. Artifact update: "world" (append=true, last_chunk=true)
-6. Final status: `state: completed`
+6. Final status: `state: TASK_STATE_COMPLETED` (v1.0) / `completed` (v0.3)

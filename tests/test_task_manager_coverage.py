@@ -14,11 +14,12 @@ from a2a.types import (
     MessageSendParams,
     Part,
     Role,
-    Task,
-    TaskState,
-    TaskStatus,
     TextPart,
 )
+from a2a_pydantic.v10 import Message as V10Message
+from a2a_pydantic.v10 import Part as V10Part
+from a2a_pydantic.v10 import Role as V10Role
+from a2a_pydantic.v10 import Task, TaskState, TaskStatus
 from asgi_lifespan import LifespanManager
 
 from a2akit import (
@@ -62,7 +63,7 @@ def test_find_direct_reply_no_metadata():
         id="t1",
         context_id="c1",
         kind="task",
-        status=TaskStatus(state=TaskState.completed, timestamp="2024-01-01"),
+        status=TaskStatus(state=TaskState.task_state_completed, timestamp="2024-01-01T00:00:00Z"),
         history=[],
     )
     assert _find_direct_reply(task) is None
@@ -74,7 +75,7 @@ def test_find_direct_reply_no_history():
         id="t1",
         context_id="c1",
         kind="task",
-        status=TaskStatus(state=TaskState.completed, timestamp="2024-01-01"),
+        status=TaskStatus(state=TaskState.task_state_completed, timestamp="2024-01-01T00:00:00Z"),
         history=[],
         metadata={"_a2akit_direct_reply": "msg-123"},
     )
@@ -83,16 +84,16 @@ def test_find_direct_reply_no_history():
 
 def test_find_direct_reply_with_matching_message():
     """Returns the message when metadata key matches a history message."""
-    msg = Message(
-        role=Role.agent,
-        parts=[Part(TextPart(text="direct reply"))],
+    msg = V10Message(
+        role=V10Role.role_agent,
+        parts=[V10Part(text="direct reply")],
         message_id="msg-123",
     )
     task = Task(
         id="t1",
         context_id="c1",
         kind="task",
-        status=TaskStatus(state=TaskState.completed, timestamp="2024-01-01"),
+        status=TaskStatus(state=TaskState.task_state_completed, timestamp="2024-01-01T00:00:00Z"),
         history=[msg],
         metadata={"_a2akit_direct_reply": "msg-123"},
     )
@@ -103,16 +104,16 @@ def test_find_direct_reply_with_matching_message():
 
 def test_find_direct_reply_no_match():
     """Returns None when metadata key doesn't match any history message."""
-    msg = Message(
-        role=Role.agent,
-        parts=[Part(TextPart(text="other"))],
+    msg = V10Message(
+        role=V10Role.role_agent,
+        parts=[V10Part(text="other")],
         message_id="msg-999",
     )
     task = Task(
         id="t1",
         context_id="c1",
         kind="task",
-        status=TaskStatus(state=TaskState.completed, timestamp="2024-01-01"),
+        status=TaskStatus(state=TaskState.task_state_completed, timestamp="2024-01-01T00:00:00Z"),
         history=[msg],
         metadata={"_a2akit_direct_reply": "msg-not-found"},
     )
@@ -153,7 +154,7 @@ async def test_subscribe_task_terminal_state():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.completed)
+        await storage.update_task(task.id, state=TaskState.task_state_completed)
 
         with pytest.raises(UnsupportedOperationError):
             async for _ in tm.subscribe_task(task.id):
@@ -192,7 +193,7 @@ async def test_cancel_task_terminal():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.completed)
+        await storage.update_task(task.id, state=TaskState.task_state_completed)
 
         with pytest.raises(TaskNotCancelableError):
             await tm.cancel_task(task.id)
@@ -215,7 +216,7 @@ async def test_cancel_task_success():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
         result = await tm.cancel_task(task.id)
         assert result is not None
@@ -242,13 +243,13 @@ async def test_force_cancel_after_non_terminal():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
         # Use a very short deadline so it completes quickly
         await tm._force_cancel_after(task.id, 0.0)
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.canceled
+        assert loaded.status.state == TaskState.task_state_canceled
 
 
 async def test_force_cancel_after_already_terminal():
@@ -268,12 +269,12 @@ async def test_force_cancel_after_already_terminal():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.completed)
+        await storage.update_task(task.id, state=TaskState.task_state_completed)
 
         await tm._force_cancel_after(task.id, 0.0)
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
 
 
 async def test_force_cancel_after_task_not_found():
@@ -308,7 +309,7 @@ async def test_force_cancel_after_exception_handling():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
         # Break storage to trigger exception
 
@@ -338,7 +339,7 @@ async def test_send_message_follow_up_to_terminal():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.completed)
+        await storage.update_task(task.id, state=TaskState.task_state_completed)
 
         follow_up = MessageSendParams(
             message=Message(
@@ -394,7 +395,7 @@ async def test_send_message_context_mismatch():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.input_required)
+        await storage.update_task(task.id, state=TaskState.task_state_input_required)
 
         follow_up = MessageSendParams(
             message=Message(
@@ -427,7 +428,7 @@ async def test_send_message_not_accepting():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
         follow_up = MessageSendParams(
             message=Message(
@@ -516,7 +517,7 @@ async def test_enqueue_or_fail_marks_task_failed():
 
         loaded = await storage.load_task(task.id)
         assert loaded is not None
-        assert loaded.status.state == TaskState.failed
+        assert loaded.status.state == TaskState.task_state_failed
 
 
 async def test_enqueue_or_fail_double_failure():
@@ -569,7 +570,7 @@ async def test_submit_task_concurrency_error_idempotent():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.input_required)
+        await storage.update_task(task.id, state=TaskState.task_state_input_required)
 
         follow_up_id = str(uuid.uuid4())
         follow_msg = Message(
@@ -623,7 +624,7 @@ async def test_submit_task_concurrency_error_terminal():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.input_required)
+        await storage.update_task(task.id, state=TaskState.task_state_input_required)
 
         follow_msg = Message(
             role=Role.user,
@@ -638,7 +639,7 @@ async def test_submit_task_concurrency_error_terminal():
 
         async def raise_and_complete(*args, **kwargs):
             # Simulate another writer completing the task
-            await original_update(task.id, state=TaskState.completed)
+            await original_update(task.id, state=TaskState.task_state_completed)
             raise ConcurrencyError("version conflict")
 
         storage.update_task = raise_and_complete
@@ -664,7 +665,7 @@ async def test_cancel_dedup_returns_current_state():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
         # First cancel
         await tm.cancel_task(task.id)

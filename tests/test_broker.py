@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from a2a.types import Message, MessageSendParams, Part, Role, TextPart
+from a2a_pydantic.v10 import Message, Part, Role, SendMessageRequest
 
 
-def _params(text: str = "hello") -> MessageSendParams:
-    """Create minimal MessageSendParams."""
+def _params(text: str = "hello") -> SendMessageRequest:
+    """Create minimal SendMessageRequest."""
     msg = Message(
-        role=Role.user,
-        parts=[Part(root=TextPart(text=text))],
+        role=Role.role_user,
+        parts=[Part(text=text)],
         message_id="msg1",
     )
-    return MessageSendParams(message=msg)
+    return SendMessageRequest(message=msg)
 
 
 async def test_enqueue_dequeue(broker):
@@ -21,7 +21,7 @@ async def test_enqueue_dequeue(broker):
 
     async for handle in broker.receive_task_operations():
         assert handle.operation.operation == "run"
-        assert handle.operation.params.message.parts[0].root.text == "ping"
+        assert handle.operation.params.message.parts[0].text == "ping"
         assert handle.attempt == 1
         await handle.ack()
         break  # only consume one

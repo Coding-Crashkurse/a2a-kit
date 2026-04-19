@@ -1,5 +1,6 @@
 """a2akit — A2A agent framework in one import."""
 
+from a2akit._protocol import ProtocolVersion
 from a2akit.agent_card import (
     AgentCardConfig,
     CapabilitiesConfig,
@@ -105,6 +106,7 @@ __all__ = [
     "LifecycleHooks",
     "ListTasksQuery",
     "ListTasksResult",
+    "ProtocolVersion",
     "ProviderConfig",
     "PushConfigStore",
     "PushNotificationAuthenticationInfo",

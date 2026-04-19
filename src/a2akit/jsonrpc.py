@@ -6,7 +6,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from a2a.types import MessageSendParams, Task
+from a2a_pydantic import convert_to_v03, convert_to_v10, v03
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
@@ -14,7 +14,7 @@ from starlette.responses import StreamingResponse
 
 from a2akit.endpoints import _check_a2a_version, _sanitize_task_for_client
 from a2akit.middleware import A2AMiddleware, RequestEnvelope
-from a2akit.schema import DirectReply
+from a2akit.schema import DirectReply, TerminalMarker
 from a2akit.storage import ContextMismatchError, TaskNotAcceptingMessagesError
 from a2akit.storage.base import (
     ContentTypeNotSupportedError,
@@ -63,9 +63,24 @@ def _result_response(req_id: Any, result: Any) -> JSONResponse:
     return JSONResponse(content={"jsonrpc": "2.0", "id": req_id, "result": result})
 
 
-def _serialize(obj: Task | Any) -> Any:
-    """Serialize a pydantic model to a JSON-compatible dict."""
-    if isinstance(obj, Task):
+def _serialize(obj: Any) -> Any:
+    """Serialize a pydantic model to a JSON-compatible dict.
+
+    Accepts both v10 (internal) and v03 (wire) models. v10 objects are
+    converted to v03 first, then Task-shaped payloads are sanitized to
+    strip framework-internal metadata keys.
+    """
+    # Unwrap internal wrappers first so downstream logic sees concrete models.
+    if isinstance(obj, TerminalMarker):
+        obj = obj.event
+    if isinstance(obj, DirectReply):
+        obj = obj.message
+    # Anything v10 → v03 for the wire. Already v03 / unsupported objects pass through.
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        obj = convert_to_v03(obj)
+    if isinstance(obj, v03.Task):
         obj = _sanitize_task_for_client(obj)
     return obj.model_dump(mode="json", by_alias=True, exclude_none=True)
 
@@ -269,19 +284,22 @@ async def _handle_message_send(
 ) -> JSONResponse:
     """Handle message/send."""
     try:
-        send_params = MessageSendParams.model_validate(params)
+        send_params_v03 = v03.MessageSendParams.model_validate(params)
     except (ValidationError, Exception):
         return _error_response(req_id, INVALID_PARAMS, "Invalid params for message/send")
 
-    msg = send_params.message
+    msg = send_params_v03.message
     if not msg.message_id or not msg.message_id.strip():
         return _error_response(req_id, INVALID_PARAMS, "messageId is required")
+
+    # v0.3 wire → v1.0 internal
+    send_params_v10 = convert_to_v10(send_params_v03)
 
     middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
 
     try:
         tm = _get_tm(request)
-        envelope = RequestEnvelope(params=send_params)
+        envelope = RequestEnvelope(params=send_params_v10)
         started: list[A2AMiddleware] = []
         try:
             for mw in middlewares:
@@ -289,16 +307,16 @@ async def _handle_message_send(
                 started.append(mw)
 
             assert envelope.params is not None  # message endpoints always carry params
-            result = await tm.send_message(envelope.params, request_context=envelope.context)
+            result_v10 = await tm.send_message(envelope.params, request_context=envelope.context)
         except Exception:
             for mw in reversed(started):
                 await mw.after_dispatch(envelope)
             raise
 
         for mw in reversed(started):
-            await mw.after_dispatch(envelope, result)
+            await mw.after_dispatch(envelope, result_v10)
 
-        return _result_response(req_id, _serialize(result))
+        return _result_response(req_id, _serialize(result_v10))
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 
@@ -321,20 +339,21 @@ async def _handle_message_send_stream(
     if err is not None:
         return err
     try:
-        send_params = MessageSendParams.model_validate(params)
+        send_params_v03 = v03.MessageSendParams.model_validate(params)
     except (ValidationError, Exception):
         return _error_response(req_id, INVALID_PARAMS, "Invalid params for message/stream")
 
-    msg = send_params.message
+    msg = send_params_v03.message
     if not msg.message_id or not msg.message_id.strip():
         return _error_response(req_id, INVALID_PARAMS, "messageId is required")
 
+    send_params_v10 = convert_to_v10(send_params_v03)
     middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
     started: list[A2AMiddleware] = []
 
     try:
         tm = _get_tm(request)
-        envelope = RequestEnvelope(params=send_params)
+        envelope = RequestEnvelope(params=send_params_v10)
         try:
             for mw in middlewares:
                 await mw.before_dispatch(envelope, request)
@@ -369,6 +388,8 @@ async def _handle_message_send_stream(
                     continue
                 payload = {"jsonrpc": "2.0", "id": req_id, "result": _serialize(event)}
                 yield f"id: {event_id or ''}\ndata: {json.dumps(payload)}\n\n"
+                if isinstance(event, TerminalMarker):
+                    break
         except Exception:
             logger.exception("JSON-RPC SSE stream aborted")
         finally:
@@ -407,20 +428,35 @@ async def _handle_tasks_list(
     """Handle tasks/list."""
     try:
         tm = _get_tm(request)
+        # Client sends v0.3 TaskState strings ("submitted", "working", ...).
+        # Convert to v10 TaskState before hitting storage.
+        raw_status = params.get("status")
+        status_v10 = None
+        if raw_status is not None:
+            try:
+                status_v10 = convert_to_v10(v03.TaskState(raw_status))
+            except ValueError:
+                return _error_response(req_id, INVALID_PARAMS, f"Invalid status: {raw_status!r}")
         query = ListTasksQuery(
             context_id=params.get("contextId"),
-            status=params.get("status"),
+            status=status_v10,
             page_size=params.get("pageSize", 50),
             page_token=params.get("pageToken"),
             history_length=params.get("historyLength"),
             status_timestamp_after=params.get("statusTimestampAfter"),
             include_artifacts=params.get("includeArtifacts", False),
         )
-        result = await tm.list_tasks(query)
-        result.tasks = [_sanitize_task_for_client(t) for t in result.tasks]
-        return _result_response(
-            req_id, result.model_dump(mode="json", by_alias=True, exclude_none=True)
-        )
+        result_v10 = await tm.list_tasks(query)
+        v03_tasks = [_sanitize_task_for_client(convert_to_v03(t)) for t in result_v10.tasks]
+        payload = {
+            "tasks": [
+                t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in v03_tasks
+            ],
+            "nextPageToken": result_v10.next_page_token,
+            "pageSize": result_v10.page_size,
+            "totalSize": result_v10.total_size,
+        }
+        return _result_response(req_id, payload)
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 
@@ -557,10 +593,10 @@ async def _handle_push_set(request: Request, req_id: Any, params: dict[str, Any]
     storage = _get_storage(request)
 
     try:
-        from a2akit.push.endpoints import _serialize_tpnc, handle_set_config
+        from a2akit.push.endpoints import _serialize_tpnc_v03, handle_set_config
 
         result = await handle_set_config(push_store, storage, task_id, config_data)
-        return _result_response(req_id, _serialize_tpnc(result))
+        return _result_response(req_id, _serialize_tpnc_v03(result))
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 
@@ -580,10 +616,10 @@ async def _handle_push_get(request: Request, req_id: Any, params: dict[str, Any]
     storage = _get_storage(request)
 
     try:
-        from a2akit.push.endpoints import _serialize_tpnc, handle_get_config
+        from a2akit.push.endpoints import _serialize_tpnc_v03, handle_get_config
 
         result = await handle_get_config(push_store, storage, task_id, config_id)
-        return _result_response(req_id, _serialize_tpnc(result))
+        return _result_response(req_id, _serialize_tpnc_v03(result))
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 
@@ -602,10 +638,10 @@ async def _handle_push_list(request: Request, req_id: Any, params: dict[str, Any
     storage = _get_storage(request)
 
     try:
-        from a2akit.push.endpoints import _serialize_tpnc, handle_list_configs
+        from a2akit.push.endpoints import _serialize_tpnc_v03, handle_list_configs
 
         configs = await handle_list_configs(push_store, storage, task_id)
-        return _result_response(req_id, [_serialize_tpnc(c) for c in configs])
+        return _result_response(req_id, [_serialize_tpnc_v03(c) for c in configs])
     except Exception as exc:
         return _map_exception_to_error(req_id, exc)
 

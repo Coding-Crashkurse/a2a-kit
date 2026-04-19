@@ -6,9 +6,11 @@
 [![CI](https://github.com/Coding-Crashkurse/a2akit/actions/workflows/ci.yml/badge.svg)](https://github.com/Coding-Crashkurse/a2akit/actions)
 [![Coverage](https://img.shields.io/badge/coverage-80%25+-brightgreen)](https://github.com/Coding-Crashkurse/a2akit)
 
-**Production-grade [A2A protocol](https://google.github.io/A2A/) framework for Python.**
+**Production-grade [A2A protocol](https://a2a-protocol.org/) framework for Python.**
 
 Build Agent-to-Agent agents with streaming, cancellation, multi-turn conversations, push notifications, pluggable backends (Memory, SQLite, PostgreSQL, Redis), OpenTelemetry, and a built-in debug UI — all on top of FastAPI.
+
+**Protocol:** a2akit speaks A2A **v1.0** natively (bare REST paths, PascalCase JSON-RPC, flat parts, `google.rpc.Status` errors). Each server serves exactly one wire version — `"1.0"` (default) or `"0.3"`; mismatched clients get a typed `ProtocolVersionMismatchError`. See [Protocol versions](#protocol-versions) below.
 
 ## Why a2akit?
 
@@ -205,6 +207,45 @@ EventBus (fan-out)  -- Memory | Redis Pub/Sub + Streams
 SSE stream to client
 ```
 
+## Protocol versions
+
+a2akit defaults to **A2A v1.0** (current spec). Each server serves **exactly one** wire version — there is no dual mode. If you need to front both v0.3 and v1.0 clients, run two `A2AServer` instances on different ports.
+
+```python
+# Serve v1.0 only — default
+A2AServer(worker=..., agent_card=...)
+
+# Serve v0.3 only (legacy clients)
+A2AServer(worker=..., agent_card=..., protocol_version="0.3")
+```
+
+You can also set the global default via env var: `A2AKIT_DEFAULT_PROTOCOL_VERSION=0.3`.
+
+Passing a set / list (e.g. `protocol_version={"1.0", "0.3"}`) raises `ValueError` at init — single-version is an explicit design choice, not a convention to drift around.
+
+The `A2AClient` auto-detects the server's protocol from the agent card — no version flag needed. It reads `supportedInterfaces[]` on v1.0 cards and falls back to `preferredTransport` + `additionalInterfaces[]` on v0.3 cards. When the server advertises a version the client can't speak, or when a request is rejected by the server's `A2A-Version` header check, you get a typed `ProtocolVersionMismatchError` you can catch:
+
+```python
+from a2akit import A2AClient
+from a2akit.client.errors import ProtocolVersionMismatchError
+
+try:
+    async with A2AClient("http://remote-agent:8000") as client:
+        await client.send("hi")
+except ProtocolVersionMismatchError as exc:
+    print(f"client speaks {exc.client_version}, server wants {exc.server_version}")
+```
+
+**What v1.0 changes:**
+
+- Wire format: bare REST paths (`/message:send`, `/tasks/{id}`), PascalCase JSON-RPC methods (`SendMessage`, `GetTask`).
+- Errors: `google.rpc.Status` envelope with `ErrorInfo.reason` (`TASK_NOT_FOUND`, `TASK_NOT_CANCELABLE`, …) instead of raw JSON-RPC numeric codes.
+- Enums uppercase and prefixed: `TASK_STATE_COMPLETED`, `ROLE_USER`.
+- `Part` is flat: `{"text": "..."}`, `{"url": "...", "media_type": "..."}` — no more `kind` discriminator.
+- `TaskPushNotificationConfig` is flat: `{taskId, id, url, token, authentication}` — no nested `pushNotificationConfig` wrapper.
+- Streaming: wrapped discriminator (`{"taskStatusUpdate": {...}}`, `{"taskArtifactUpdate": {...}, "index": N}`), no `final` flag.
+- Agent-card signing: detached JWS (RFC 7515) + JCS (RFC 8785) canonicalization; client verifies via `verify_signatures="soft"` (default) / `"strict"` / `"off"`.
+
 ## Extras
 
 ```bash
@@ -213,6 +254,7 @@ pip install a2akit[postgres]    # PostgreSQL storage
 pip install a2akit[sqlite]      # SQLite storage
 pip install a2akit[langgraph]   # LangGraph integration
 pip install a2akit[otel]        # OpenTelemetry tracing & metrics
+pip install a2akit[signatures]  # Agent-card JWS signature verification
 ```
 
 ## All Features

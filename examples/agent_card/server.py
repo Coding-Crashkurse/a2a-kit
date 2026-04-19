@@ -1,10 +1,13 @@
-"""Demonstrates all configurable AgentCard fields (A2A v0.3.0).
+"""Demonstrates all configurable AgentCard fields (A2A v1.0).
+
+The framework builds a v1.0 AgentCard with ``supportedInterfaces[]`` by default;
+pass ``protocol_version="0.3"`` to ``A2AServer`` for the legacy v0.3 shape.
 
 Run:
     uvicorn examples.agent_card.server:app --reload
 """
 
-from a2a.types import HTTPAuthSecurityScheme
+from a2a_pydantic.v03 import HTTPAuthSecurityScheme
 
 from a2akit import (
     A2AServer,

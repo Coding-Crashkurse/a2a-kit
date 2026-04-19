@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from a2a.types import Message, Part, Role, TaskState, TextPart
+from a2a.types import Message, Part, Role, TextPart
+from a2a_pydantic.v10 import TaskState
 from asgi_lifespan import LifespanManager
 
 from a2akit import AgentCardConfig, CapabilitiesConfig
@@ -40,6 +41,10 @@ def test_capability_enabled():
     assert caps.state_transition_history is True
 
 
+@pytest.mark.skip(
+    reason="v1.0 AgentCapabilities does not expose state_transition_history; "
+    "dual-card work will reinstate v0.3 shape assertions"
+)
 def test_capability_reflected_in_agent_card():
     """CapabilitiesConfig(state_transition_history=True) flows to AgentCard."""
     config = AgentCardConfig(
@@ -52,6 +57,10 @@ def test_capability_reflected_in_agent_card():
     assert card.capabilities.state_transition_history is True
 
 
+@pytest.mark.skip(
+    reason="v1.0 AgentCapabilities does not expose state_transition_history; "
+    "dual-card work will reinstate v0.3 shape assertions"
+)
 def test_capability_default_false_in_agent_card():
     """Default config has stateTransitionHistory=False in AgentCard."""
     config = AgentCardConfig(name="Test", description="Test", protocol="http+json")
@@ -62,14 +71,18 @@ def test_capability_default_false_in_agent_card():
 async def test_transitions_recorded_in_memory(storage):
     """InMemoryStorage records state transitions in metadata."""
     task = await storage.create_task("ctx-1", _msg())
-    await storage.update_task(task.id, state=TaskState.working)
-    await storage.update_task(task.id, state=TaskState.completed)
+    await storage.update_task(task.id, state=TaskState.task_state_working)
+    await storage.update_task(task.id, state=TaskState.task_state_completed)
 
     loaded = await storage.load_task(task.id)
     assert loaded is not None
     transitions = loaded.metadata["stateTransitions"]
     assert len(transitions) == 3
-    assert [t["state"] for t in transitions] == ["submitted", "working", "completed"]
+    assert [t["state"] for t in transitions] == [
+        "TASK_STATE_SUBMITTED",
+        "TASK_STATE_WORKING",
+        "TASK_STATE_COMPLETED",
+    ]
     for t in transitions:
         assert "state" in t
         assert "timestamp" in t
@@ -80,21 +93,21 @@ async def test_transition_with_status_message(storage):
     task = await storage.create_task("ctx-1", _msg())
     await storage.update_task(
         task.id,
-        state=TaskState.failed,
+        state=TaskState.task_state_failed,
         status_message=_status_msg("Error!"),
     )
 
     loaded = await storage.load_task(task.id)
     transitions = loaded.metadata["stateTransitions"]
     last = transitions[-1]
-    assert last["state"] == "failed"
+    assert last["state"] == "TASK_STATE_FAILED"
     assert last["messageText"] == "Error!"
 
 
 async def test_transition_without_status_message(storage):
     """Transition record has no messageText when status_message is absent."""
     task = await storage.create_task("ctx-1", _msg())
-    await storage.update_task(task.id, state=TaskState.working)
+    await storage.update_task(task.id, state=TaskState.task_state_working)
 
     loaded = await storage.load_task(task.id)
     transitions = loaded.metadata["stateTransitions"]
@@ -105,28 +118,36 @@ async def test_transition_without_status_message(storage):
 async def test_transitions_survive_task_metadata_merge(storage):
     """External task_metadata merge does not overwrite stateTransitions."""
     task = await storage.create_task("ctx-1", _msg())
-    await storage.update_task(task.id, state=TaskState.working)
+    await storage.update_task(task.id, state=TaskState.task_state_working)
     await storage.update_task(task.id, task_metadata={"custom": "value"})
-    await storage.update_task(task.id, state=TaskState.completed)
+    await storage.update_task(task.id, state=TaskState.task_state_completed)
 
     loaded = await storage.load_task(task.id)
     assert loaded.metadata["custom"] == "value"
     transitions = loaded.metadata["stateTransitions"]
     assert len(transitions) == 3
-    assert [t["state"] for t in transitions] == ["submitted", "working", "completed"]
+    assert [t["state"] for t in transitions] == [
+        "TASK_STATE_SUBMITTED",
+        "TASK_STATE_WORKING",
+        "TASK_STATE_COMPLETED",
+    ]
 
 
 async def test_transitions_recorded_in_sql(sql_storage):
     """SQL storage records state transitions in metadata."""
     task = await sql_storage.create_task("ctx-1", _msg())
-    await sql_storage.update_task(task.id, state=TaskState.working)
-    await sql_storage.update_task(task.id, state=TaskState.completed)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_working)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_completed)
 
     loaded = await sql_storage.load_task(task.id)
     assert loaded is not None
     transitions = loaded.metadata["stateTransitions"]
     assert len(transitions) == 3
-    assert [t["state"] for t in transitions] == ["submitted", "working", "completed"]
+    assert [t["state"] for t in transitions] == [
+        "TASK_STATE_SUBMITTED",
+        "TASK_STATE_WORKING",
+        "TASK_STATE_COMPLETED",
+    ]
 
 
 async def test_sql_transition_with_status_message(sql_storage):
@@ -134,7 +155,7 @@ async def test_sql_transition_with_status_message(sql_storage):
     task = await sql_storage.create_task("ctx-1", _msg())
     await sql_storage.update_task(
         task.id,
-        state=TaskState.failed,
+        state=TaskState.task_state_failed,
         status_message=_status_msg("Boom!"),
     )
 
@@ -146,15 +167,19 @@ async def test_sql_transition_with_status_message(sql_storage):
 async def test_sql_transitions_survive_metadata_merge(sql_storage):
     """SQL storage: external metadata merge preserves stateTransitions."""
     task = await sql_storage.create_task("ctx-1", _msg())
-    await sql_storage.update_task(task.id, state=TaskState.working)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_working)
     await sql_storage.update_task(task.id, task_metadata={"custom": "value"})
-    await sql_storage.update_task(task.id, state=TaskState.completed)
+    await sql_storage.update_task(task.id, state=TaskState.task_state_completed)
 
     loaded = await sql_storage.load_task(task.id)
     assert loaded.metadata["custom"] == "value"
     transitions = loaded.metadata["stateTransitions"]
     assert len(transitions) == 3
-    assert [t["state"] for t in transitions] == ["submitted", "working", "completed"]
+    assert [t["state"] for t in transitions] == [
+        "TASK_STATE_SUBMITTED",
+        "TASK_STATE_WORKING",
+        "TASK_STATE_COMPLETED",
+    ]
 
 
 @pytest.fixture
@@ -178,8 +203,8 @@ async def test_transitions_visible_via_http(client_with_transitions, make_send_p
     transitions = data.get("metadata", {}).get("stateTransitions", [])
     assert len(transitions) >= 2  # at least submitted + completed
     states = [t["state"] for t in transitions]
-    assert states[0] == "submitted"
-    assert states[-1] == "completed"
+    assert states[0] == "TASK_STATE_SUBMITTED"
+    assert states[-1] == "TASK_STATE_COMPLETED"
 
 
 async def test_transitions_in_tasks_get(client_with_transitions, make_send_params):
@@ -193,8 +218,8 @@ async def test_transitions_in_tasks_get(client_with_transitions, make_send_param
     data = resp2.json()
     transitions = data.get("metadata", {}).get("stateTransitions", [])
     assert len(transitions) >= 2
-    assert transitions[0]["state"] == "submitted"
-    assert transitions[-1]["state"] == "completed"
+    assert transitions[0]["state"] == "TASK_STATE_SUBMITTED"
+    assert transitions[-1]["state"] == "TASK_STATE_COMPLETED"
 
 
 @pytest.fixture
@@ -216,6 +241,6 @@ async def test_transitions_include_working_states(status_client, make_send_param
     data = resp.json()
     transitions = data.get("metadata", {}).get("stateTransitions", [])
     states = [t["state"] for t in transitions]
-    assert "submitted" in states
-    assert "working" in states
-    assert "completed" in states
+    assert "TASK_STATE_SUBMITTED" in states
+    assert "TASK_STATE_WORKING" in states
+    assert "TASK_STATE_COMPLETED" in states

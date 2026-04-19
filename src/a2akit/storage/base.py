@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Self
 
-from a2a.types import Artifact, Message, Task, TaskState
+from a2a_pydantic import v10
 from pydantic import BaseModel, Field
 from typing_extensions import TypeVar
 
@@ -16,11 +16,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_STATES: set[TaskState] = {
-    TaskState.completed,
-    TaskState.canceled,
-    TaskState.failed,
-    TaskState.rejected,
+# Reserved, framework-internal metadata keys on v10.Task / v10.Message.
+# v10.Task has no top-level tenant/createdAt fields — we stash them here.
+# All keys are prefixed with ``_a2akit_`` so they can be bulk-stripped by
+# ``_sanitize_task_for_client`` before leaving the framework boundary.
+META_TENANT_KEY = "_a2akit_tenant"
+META_CREATED_AT_KEY = "_a2akit_createdAt"
+META_LAST_MODIFIED_KEY = "_a2akit_lastModified"
+
+# v1.0 drops ``TaskState.unknown``. v1.0 terminal states are the same four
+# (completed/canceled/failed/rejected) plus nothing else — ``auth_required``
+# and ``input_required`` are INTERRUPTIONS, not terminals, per spec.
+TERMINAL_STATES: set[v10.TaskState] = {
+    v10.TaskState.task_state_completed,
+    v10.TaskState.task_state_canceled,
+    v10.TaskState.task_state_failed,
+    v10.TaskState.task_state_rejected,
 }
 
 
@@ -35,7 +46,7 @@ class TaskTerminalStateError(Exception):
 class TaskNotAcceptingMessagesError(Exception):
     """Raised when a task does not accept new user input in its current state."""
 
-    def __init__(self, state: TaskState | None = None) -> None:
+    def __init__(self, state: v10.TaskState | None = None) -> None:
         self.state = state
         super().__init__("Task is not accepting messages")
 
@@ -80,7 +91,8 @@ class ListTasksQuery(BaseModel):
     """Filter and pagination parameters for listing tasks."""
 
     context_id: str | None = None
-    status: TaskState | None = None
+    tenant: str | None = None
+    status: v10.TaskState | None = None
     page_size: int = Field(default=50, ge=1, le=100)
     page_token: str | None = None
     history_length: int | None = None
@@ -91,7 +103,7 @@ class ListTasksQuery(BaseModel):
 class ListTasksResult(BaseModel):
     """Paginated result from listing tasks."""
 
-    tasks: list[Task] = Field(default_factory=list)
+    tasks: list[v10.Task] = Field(default_factory=list)
     next_page_token: str = Field(default="", serialization_alias="nextPageToken")
     page_size: int = Field(default=50, serialization_alias="pageSize")
     total_size: int = Field(default=0, serialization_alias="totalSize")
@@ -108,22 +120,78 @@ class ArtifactWrite:
     which applied a single flag to all artifacts in the list.
     """
 
-    artifact: Artifact
+    artifact: v10.Artifact
     append: bool = False
+
+
+def _coerce_v10_message(msg: Any) -> v10.Message:
+    """Coerce a v0.3-shaped / a2a-sdk Message into a v10.Message.
+
+    Legacy tests and user code still construct ``a2a.types.Message`` or
+    ``a2a_pydantic.v03.Message`` objects and hand them to the v10-only
+    storage layer. Rather than force every caller to migrate, this helper
+    round-trips through JSON and uses the library's ``convert_to_v10``.
+    Pass-through when the input is already a ``v10.Message``.
+    """
+    if isinstance(msg, v10.Message):
+        return msg
+    # Fast path: v03.Message → convert.
+    try:
+        from a2a_pydantic import convert_to_v10, v03
+    except ImportError:  # pragma: no cover
+        raise TypeError(f"Cannot coerce {type(msg).__name__} to v10.Message") from None
+    if isinstance(msg, v03.Message):
+        return convert_to_v10(msg)
+    # Slow path: any other Pydantic model that can serialize to the v03 wire
+    # shape (notably ``a2a.types.Message`` from the a2a-sdk package).
+    if hasattr(msg, "model_dump"):
+        try:
+            payload = msg.model_dump(mode="json", by_alias=True, exclude_none=True)
+            v03_msg = v03.Message.model_validate(payload)
+            return convert_to_v10(v03_msg)
+        except Exception as exc:
+            raise TypeError(f"Cannot coerce {type(msg).__name__} to v10.Message: {exc}") from exc
+    raise TypeError(f"Cannot coerce {type(msg).__name__} to v10.Message")
+
+
+def _coerce_v10_messages(msgs: Any) -> list[v10.Message] | None:
+    """Apply :func:`_coerce_v10_message` element-wise. ``None`` stays ``None``."""
+    if msgs is None:
+        return None
+    return [_coerce_v10_message(m) for m in msgs]
+
+
+def _coerce_v10_artifact(a: Any) -> v10.Artifact:
+    """Coerce a v0.3-shaped Artifact into a v10.Artifact via JSON round-trip."""
+    if isinstance(a, v10.Artifact):
+        return a
+    try:
+        from a2a_pydantic import convert_to_v10, v03
+    except ImportError:  # pragma: no cover
+        raise TypeError(f"Cannot coerce {type(a).__name__} to v10.Artifact") from None
+    if isinstance(a, v03.Artifact):
+        return convert_to_v10(a)
+    if hasattr(a, "model_dump"):
+        try:
+            payload = a.model_dump(mode="json", by_alias=True, exclude_none=True)
+            v03_a = v03.Artifact.model_validate(payload)
+            return convert_to_v10(v03_a)
+        except Exception as exc:
+            raise TypeError(f"Cannot coerce {type(a).__name__} to v10.Artifact: {exc}") from exc
+    raise TypeError(f"Cannot coerce {type(a).__name__} to v10.Artifact")
 
 
 def _build_transition_record(
     state: str,
     timestamp: str,
-    status_message: Message | None = None,
+    status_message: v10.Message | None = None,
 ) -> dict[str, str]:
     """Build a state-transition record for ``metadata["stateTransitions"]``."""
     record: dict[str, str] = {"state": state, "timestamp": timestamp}
     if status_message:
         for part in status_message.parts or []:
-            root = getattr(part, "root", part)
-            if hasattr(root, "text") and root.text:
-                record["messageText"] = root.text
+            if part.text:
+                record["messageText"] = part.text
                 break
     return record
 
@@ -174,7 +242,7 @@ class Storage(ABC, Generic[ContextT]):
         history_length: int | None = None,
         *,
         include_artifacts: bool = True,
-    ) -> Task | None: ...
+    ) -> v10.Task | None: ...
 
     async def list_tasks(self, query: ListTasksQuery) -> ListTasksResult:
         """Return filtered and paginated tasks.
@@ -188,10 +256,10 @@ class Storage(ABC, Generic[ContextT]):
     async def create_task(
         self,
         context_id: str,
-        message: Message,
+        message: v10.Message,
         *,
         idempotency_key: str | None = None,
-    ) -> Task:
+    ) -> v10.Task:
         """Create a brand-new task from an initial message.
 
         **Message contract:** Implementations MUST NOT mutate the input
@@ -232,11 +300,11 @@ class Storage(ABC, Generic[ContextT]):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState | None = None,
+        state: v10.TaskState | None = None,
         *,
-        status_message: Message | None = None,
+        status_message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
-        messages: list[Message] | None = None,
+        messages: list[v10.Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:

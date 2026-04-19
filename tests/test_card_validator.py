@@ -57,7 +57,7 @@ class TestCardValidator:
         client = A2AClient("http://test", httpx_client=server_http, card_validator=capture)
         await client.connect()
 
-        from a2a.types import AgentCard
+        from a2a_pydantic.v03 import AgentCard
 
         assert isinstance(received["card"], AgentCard)
         assert isinstance(received["raw_body"], bytes)

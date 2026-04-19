@@ -6,7 +6,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeVar
 
-from a2a.types import MessageSendParams
+from a2a_pydantic import v10
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ class _TaskOperation(BaseModel, Generic[OperationT, ParamsT]):
     params: ParamsT
 
 
-class _RunTask(_TaskOperation[Literal["run"], MessageSendParams]):
+class _RunTask(_TaskOperation[Literal["run"], v10.SendMessageRequest]):
     """Run-task operation with optional new-task hint and request context."""
 
     is_new_task: bool = False
@@ -128,7 +128,7 @@ class Broker(ABC):
     @abstractmethod
     async def run_task(
         self,
-        params: MessageSendParams,
+        params: v10.SendMessageRequest,
         *,
         is_new_task: bool = False,
         request_context: dict[str, Any] | None = None,

@@ -7,16 +7,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from a2a.types import (
-    Message,
-    Part,
-    Role,
-    TaskState,
-    TaskStatus,
-    TaskStatusUpdateEvent,
-    TextPart,
-)
+from a2a_pydantic import v10
 
+from a2akit.schema import TerminalMarker
 from a2akit.storage.base import (
     TERMINAL_STATES,
     ConcurrencyError,
@@ -70,9 +63,9 @@ async def cancel_task_in_storage(
     # cancellation path doesn't have it).
     resolved_ctx = context_id or task.context_id
 
-    cancel_message = Message(
-        role=Role.agent,
-        parts=[Part(TextPart(text=reason))],
+    cancel_message = v10.Message(
+        role=v10.Role.role_agent,
+        parts=[v10.Part(text=reason)],
         message_id=str(uuid.uuid4()),
         task_id=task_id,
         context_id=resolved_ctx,
@@ -80,7 +73,7 @@ async def cancel_task_in_storage(
     try:
         await emitter.update_task(
             task_id,
-            state=TaskState.canceled,
+            state=v10.TaskState.task_state_canceled,
             status_message=cancel_message,
             messages=[cancel_message],
             artifacts=artifacts or None,
@@ -105,7 +98,7 @@ async def cancel_task_in_storage(
         try:
             await emitter.update_task(
                 task_id,
-                state=TaskState.canceled,
+                state=v10.TaskState.task_state_canceled,
                 status_message=cancel_message,
                 messages=[cancel_message],
                 artifacts=artifacts or None,
@@ -121,18 +114,21 @@ async def cancel_task_in_storage(
                     logger.warning("Artifact-only fallback failed for task %s", task_id)
             return
 
-    status = TaskStatus(
-        state=TaskState.canceled,
+    status = v10.TaskStatus(
+        state=v10.TaskState.task_state_canceled,
         timestamp=datetime.now(UTC).isoformat(),
         message=cancel_message,
     )
+    # v1.0: wrap the final event in TerminalMarker so the SSE generator
+    # knows to close the stream (v0.3 compat layer reads this and sets
+    # `final=True` on its outbound v03 event).
     await emitter.send_event(
         task_id,
-        TaskStatusUpdateEvent(
-            kind="status-update",
-            task_id=task_id,
-            context_id=resolved_ctx,
-            status=status,
-            final=True,
+        TerminalMarker(
+            event=v10.TaskStatusUpdateEvent(
+                task_id=task_id,
+                context_id=resolved_ctx,
+                status=status,
+            )
         ),
     )

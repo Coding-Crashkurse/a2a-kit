@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from a2a.types import Artifact as A2AArtifact
-from a2a.types import Message, Part, TextPart
-
+from a2akit._parts import extract_text
 from a2akit.worker.base import (
     HistoryMessage,
     PreviousArtifact,
@@ -14,7 +12,7 @@ from a2akit.worker.base import (
 )
 
 if TYPE_CHECKING:
-    from a2a.types import MessageSendConfiguration
+    from a2a_pydantic import v10
 
     from a2akit.broker.base import CancelScope
     from a2akit.dependencies import DependencyContainer
@@ -38,16 +36,16 @@ class ContextFactory:
 
     async def build(
         self,
-        message: Message,
+        message: v10.Message,
         cancel_event: CancelScope,
         *,
         is_new_task: bool = False,
         request_context: dict[str, Any] | None = None,
-        configuration: MessageSendConfiguration | None = None,
+        configuration: v10.SendMessageConfiguration | None = None,
         deferred_storage: bool = False,
     ) -> TaskContextImpl:
         """Construct a TaskContextImpl from a broker message."""
-        user_text = self._extract_text(message.parts)
+        user_text = extract_text(list(message.parts))
 
         history: list[HistoryMessage] = []
         previous_artifacts: list[PreviousArtifact] = []
@@ -71,7 +69,7 @@ class ContextFactory:
             message_id=message.message_id or "",
             user_text=user_text,
             parts=message.parts,
-            metadata=message.metadata or {},
+            metadata=dict(message.metadata or {}),
             emitter=self._emitter,
             cancel_event=cancel_event,
             storage=self._storage,
@@ -88,42 +86,41 @@ class ContextFactory:
         return ctx
 
     @staticmethod
-    def _extract_text(parts: list[Part]) -> str:
-        """Join all text parts of a message into a single string."""
-        return "\n".join(
-            part.root.text for part in parts if isinstance(part.root, TextPart) and part.root.text
-        )
+    def _convert_history(
+        messages: list[v10.Message], current_message_id: str
+    ) -> list[HistoryMessage]:
+        """Convert v10 Messages to HistoryMessage wrappers, excluding current.
 
-    @staticmethod
-    def _convert_history(messages: list[Any], current_message_id: str) -> list[HistoryMessage]:
-        """Convert A2A Messages to HistoryMessage wrappers, excluding current."""
+        v10 Role values are ``ROLE_USER`` / ``ROLE_AGENT`` on the wire. Normalize
+        to the ergonomic ``"user"`` / ``"agent"`` form that worker authors expect
+        — the spec calls this out explicitly (§3.5) as a deliberate papercut
+        removal.
+        """
         result: list[HistoryMessage] = []
         for msg in messages:
-            msg_id = getattr(msg, "message_id", "") or ""
+            msg_id = msg.message_id or ""
             if msg_id == current_message_id and current_message_id:
                 continue
-            text_parts = []
-            for part in getattr(msg, "parts", []):
-                root = getattr(part, "root", part)
-                if isinstance(root, TextPart) and root.text:
-                    text_parts.append(root.text)
+            text_parts = [p.text for p in msg.parts if p.text]
+            raw_role = msg.role.name if msg.role else ""
+            normalized_role = "user" if raw_role == "role_user" else "agent"
             result.append(
                 HistoryMessage(
-                    role=getattr(msg.role, "value", str(msg.role)) if msg.role else "",
+                    role=normalized_role,
                     text="\n".join(text_parts),
-                    parts=list(getattr(msg, "parts", [])),
+                    parts=list(msg.parts),
                     message_id=msg_id,
                 )
             )
         return result
 
     @staticmethod
-    def _convert_artifacts(artifacts: list[A2AArtifact]) -> list[PreviousArtifact]:
-        """Convert A2A Artifacts to PreviousArtifact wrappers."""
+    def _convert_artifacts(artifacts: list[v10.Artifact]) -> list[PreviousArtifact]:
+        """Convert v10.Artifacts to PreviousArtifact wrappers."""
         return [
             PreviousArtifact(
                 artifact_id=a.artifact_id,
-                name=getattr(a, "name", None),
+                name=a.name or None,
                 parts=list(a.parts) if a.parts else [],
             )
             for a in artifacts

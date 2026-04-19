@@ -6,11 +6,12 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from a2a.types import AgentCard, Message, MessageSendParams, Task
+from a2a_pydantic.v03 import AgentCard, Message, MessageSendParams, Task
 
 from a2akit.client.errors import (
     A2AClientError,
     ProtocolError,
+    ProtocolVersionMismatchError,
     TaskNotCancelableError,
     TaskNotFoundError,
     TaskTerminalError,
@@ -64,6 +65,14 @@ class JsonRpcTransport(Transport):
             code = err.get("code", 0)
             message = err.get("message", "Unknown error")
 
+            # Spec §3.6.2 — server rejected the client's A2A-Version header.
+            if code == -32009:
+                raise ProtocolVersionMismatchError(
+                    client_version=A2A_VERSION,
+                    server_version="unknown",
+                    detail=str(message),
+                )
+
             exc_cls = _ERROR_MAP.get(code)
             if exc_cls is not None:
                 if exc_cls is TaskNotFoundError:
@@ -89,7 +98,16 @@ class JsonRpcTransport(Transport):
             raise ProtocolError(f"Request failed: {exc}") from exc
 
         if not response.is_success:
-            raise ProtocolError(f"HTTP {response.status_code}: {response.text}")
+            body_text = response.text or ""
+            # Surface A2A-Version rejections (both v0.3 ``-32009`` and the
+            # v1.0 INVALID_ARGUMENT envelope) as the typed mismatch.
+            if response.status_code == 400 and "Unsupported A2A version" in body_text:
+                raise ProtocolVersionMismatchError(
+                    client_version=A2A_VERSION,
+                    server_version="unknown",
+                    detail=body_text,
+                )
+            raise ProtocolError(f"HTTP {response.status_code}: {body_text}")
 
         try:
             data = response.json()

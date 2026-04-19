@@ -9,12 +9,15 @@ from abc import abstractmethod
 from datetime import UTC, datetime
 from typing import Any
 
-from a2a.types import Artifact, Message, Task, TaskState, TaskStatus
+from a2a_pydantic import v10
 from sqlalchemy import Column, Integer, MetaData, String, Table, Text, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from a2akit.storage.base import (
+    META_CREATED_AT_KEY,
+    META_LAST_MODIFIED_KEY,
+    META_TENANT_KEY,
     TERMINAL_STATES,
     ArtifactWrite,
     ConcurrencyError,
@@ -25,6 +28,9 @@ from a2akit.storage.base import (
     TaskNotFoundError,
     TaskTerminalStateError,
     _build_transition_record,
+    _coerce_v10_artifact,
+    _coerce_v10_message,
+    _coerce_v10_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,9 +86,9 @@ class SQLStorageBase(Storage[ContextT]):
         session: AsyncSession,
         task_id: str,
         context_id: str,
-        message: Message,
+        message: v10.Message,
         idempotency_key: str,
-    ) -> Task | None:
+    ) -> v10.Task | None:
         """Idempotent INSERT. Returns existing task if key exists, else None."""
 
     async def __aenter__(self) -> SQLStorageBase[ContextT]:
@@ -115,66 +121,66 @@ class SQLStorageBase(Storage[ContextT]):
         return self._session_factory()
 
     @staticmethod
-    def _serialize_message(msg: Message | None) -> str | None:
+    def _serialize_message(msg: v10.Message | None) -> str | None:
         if msg is None:
             return None
-        return msg.model_dump_json(by_alias=True, exclude_none=True)
+        out: str = msg.model_dump_json(by_alias=True, exclude_none=True)
+        return out
 
     @staticmethod
-    def _deserialize_message(data: str | None) -> Message | None:
+    def _deserialize_message(data: str | None) -> v10.Message | None:
         if not data:
             return None
-        return Message.model_validate_json(data)
+        return v10.Message.model_validate_json(data)
 
     @staticmethod
-    def _serialize_messages(msgs: list[Message]) -> str:
+    def _serialize_messages(msgs: list[v10.Message]) -> str:
         return json.dumps(
             [m.model_dump(mode="json", by_alias=True, exclude_none=True) for m in msgs]
         )
 
     @staticmethod
-    def _deserialize_messages(data: str) -> list[Message]:
+    def _deserialize_messages(data: str) -> list[v10.Message]:
         raw = json.loads(data)
-        return [Message.model_validate(m) for m in raw]
+        return [v10.Message.model_validate(m) for m in raw]
 
     @staticmethod
-    def _serialize_artifacts(artifacts: list[Artifact]) -> str:
+    def _serialize_artifacts(artifacts: list[v10.Artifact]) -> str:
         return json.dumps(
             [a.model_dump(mode="json", by_alias=True, exclude_none=True) for a in artifacts]
         )
 
     @staticmethod
-    def _deserialize_artifacts(data: str) -> list[Artifact]:
+    def _deserialize_artifacts(data: str) -> list[v10.Artifact]:
         raw = json.loads(data)
-        return [Artifact.model_validate(a) for a in raw]
+        return [v10.Artifact.model_validate(a) for a in raw]
 
     def _row_to_task(
         self,
         row: Any,
         history_length: int | None = None,
         include_artifacts: bool = True,
-    ) -> Task:
+    ) -> v10.Task:
         """Convert a database row to a Task object."""
         history = self._deserialize_messages(row.history)
         if history_length is not None:
             history = history[-history_length:] if history_length > 0 else []
 
-        artifacts_list: list[Artifact] | None = None
+        artifacts_list: list[v10.Artifact] = []
         if include_artifacts:
             artifacts_list = self._deserialize_artifacts(row.artifacts)
 
         metadata_raw = json.loads(row.metadata_json) if row.metadata_json else None
 
-        status = TaskStatus(
-            state=TaskState(row.status_state),
+        status = v10.TaskStatus(
+            state=v10.TaskState(row.status_state),
             timestamp=row.status_timestamp,
             message=self._deserialize_message(row.status_message),
         )
 
-        return Task(
+        return v10.Task(
             id=row.id,
             context_id=row.context_id,
-            kind="task",
             status=status,
             history=history,
             artifacts=artifacts_list,
@@ -187,7 +193,7 @@ class SQLStorageBase(Storage[ContextT]):
         history_length: int | None = None,
         *,
         include_artifacts: bool = True,
-    ) -> Task | None:
+    ) -> v10.Task | None:
         async with self._get_session() as session:
             result = await session.execute(tasks_table.select().where(tasks_table.c.id == task_id))
             row = result.first()
@@ -200,10 +206,12 @@ class SQLStorageBase(Storage[ContextT]):
     async def create_task(
         self,
         context_id: str,
-        message: Message,
+        message: v10.Message,
         *,
         idempotency_key: str | None = None,
-    ) -> Task:
+    ) -> v10.Task:
+        # Compat: accept legacy v0.3 / a2a-sdk Messages.
+        message = _coerce_v10_message(message)
         task_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         history_msg = message.model_copy(update={"task_id": task_id, "context_id": context_id})
@@ -223,14 +231,16 @@ class SQLStorageBase(Storage[ContextT]):
             else:
                 initial_meta = {
                     "stateTransitions": [
-                        _build_transition_record(TaskState.submitted.value, now),
+                        _build_transition_record(v10.TaskState.task_state_submitted.value, now),
                     ],
+                    META_CREATED_AT_KEY: now,
+                    META_LAST_MODIFIED_KEY: now,
                 }
                 await session.execute(
                     tasks_table.insert().values(
                         id=task_id,
                         context_id=context_id,
-                        status_state=TaskState.submitted.value,
+                        status_state=v10.TaskState.task_state_submitted.value,
                         status_timestamp=now,
                         status_message=None,
                         history=self._serialize_messages([history_msg]),
@@ -247,20 +257,31 @@ class SQLStorageBase(Storage[ContextT]):
         # Attach the transient just-created marker (see storage/base.py
         # contract). Not persisted — TaskManager pops it, and
         # _sanitize_task_for_client strips any leftover _-prefixed keys.
+        # a2a-pydantic ≥0.0.6 coerces dict → Struct on assignment.
         loaded.metadata = {**(loaded.metadata or {}), "_a2akit_just_created": True}
         return loaded
 
     async def update_task(
         self,
         task_id: str,
-        state: TaskState | None = None,
+        state: v10.TaskState | None = None,
         *,
-        status_message: Message | None = None,
+        status_message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
-        messages: list[Message] | None = None,
+        messages: list[v10.Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:
+        # Compat: coerce v0.3 / sdk-shaped inputs to v10.
+        if status_message is not None:
+            status_message = _coerce_v10_message(status_message)
+        if messages:
+            messages = _coerce_v10_messages(messages)
+        if artifacts:
+            artifacts = [
+                ArtifactWrite(_coerce_v10_artifact(aw.artifact), append=aw.append)
+                for aw in artifacts
+            ]
         async with self._get_session() as session, session.begin():
             result = await session.execute(tasks_table.select().where(tasks_table.c.id == task_id))
             row = result.first()
@@ -302,24 +323,29 @@ class SQLStorageBase(Storage[ContextT]):
                 existing_meta.update(task_metadata)
                 values["metadata_json"] = json.dumps(existing_meta)
 
+            now_iso = datetime.now(UTC).isoformat()
             if state is not None:
                 values["status_state"] = state.value
-                values["status_timestamp"] = datetime.now(UTC).isoformat()
+                values["status_timestamp"] = now_iso
                 values["status_message"] = self._serialize_message(status_message)
                 # Append state-transition record (after task_metadata merge)
                 existing_meta = json.loads(
                     values.get("metadata_json") or row.metadata_json or "{}"
                 )
                 existing_meta.setdefault("stateTransitions", []).append(
-                    _build_transition_record(
-                        state.value, values["status_timestamp"], status_message
-                    ),
+                    _build_transition_record(state.value, now_iso, status_message),
                 )
+                existing_meta[META_LAST_MODIFIED_KEY] = now_iso
                 values["metadata_json"] = json.dumps(existing_meta)
             elif status_message is not None:
                 # Update status message without a state transition (e.g. progress text)
                 values["status_message"] = self._serialize_message(status_message)
-                values["status_timestamp"] = datetime.now(UTC).isoformat()
+                values["status_timestamp"] = now_iso
+                existing_meta = json.loads(
+                    values.get("metadata_json") or row.metadata_json or "{}"
+                )
+                existing_meta[META_LAST_MODIFIED_KEY] = now_iso
+                values["metadata_json"] = json.dumps(existing_meta)
 
             result = await session.execute(
                 tasks_table.update()
@@ -337,8 +363,8 @@ class SQLStorageBase(Storage[ContextT]):
 
     @staticmethod
     def _apply_artifact(
-        existing: list[Artifact], artifact: Artifact, *, append: bool
-    ) -> list[Artifact]:
+        existing: list[v10.Artifact], artifact: v10.Artifact, *, append: bool
+    ) -> list[v10.Artifact]:
         idx = next(
             (i for i, a in enumerate(existing) if a.artifact_id == artifact.artifact_id),
             None,
@@ -361,6 +387,13 @@ class SQLStorageBase(Storage[ContextT]):
                 conditions.append(tasks_table.c.status_state == query.status.value)
             if query.status_timestamp_after:
                 conditions.append(tasks_table.c.status_timestamp > query.status_timestamp_after)
+            # NOTE: tenant filter. There is no dedicated SQL column — the
+            # tenant lives inside metadata_json. We post-filter in Python
+            # after the DB fetch rather than a JSON-path query (not portable
+            # across Postgres / SQLite). Page_size acts as an upper bound on
+            # the scanned set; in tenanted workloads you'll want a proper
+            # indexed column (future work).
+            tenant_filter = query.tenant
 
             count_q = select(func.count()).select_from(tasks_table)
             for cond in conditions:
@@ -392,6 +425,10 @@ class SQLStorageBase(Storage[ContextT]):
                 )
                 for r in rows
             ]
+            if tenant_filter:
+                tasks = [
+                    t for t in tasks if (t.metadata or {}).get(META_TENANT_KEY) == tenant_filter
+                ]
 
             next_offset = offset + query.page_size
             next_token = str(next_offset) if next_offset < total_size else ""

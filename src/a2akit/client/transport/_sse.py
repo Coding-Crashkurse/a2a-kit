@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from a2a.types import Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent
+from a2a_pydantic.v03 import Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent
 
 from a2akit.client.errors import ProtocolError
 from a2akit.client.result import StreamEvent

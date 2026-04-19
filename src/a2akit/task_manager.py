@@ -9,23 +9,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from a2a.types import (
-    DataPart,
-    FilePart,
-    Message,
-    MessageSendParams,
-    Part,
-    Role,
-    Task,
-    TaskState,
-    TaskStatus,
-    TaskStatusUpdateEvent,
-    TextPart,
-)
+from a2a_pydantic import v10
 
+from a2akit._parts import part_kind
 from a2akit.cancel import cancel_task_in_storage
 from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
-from a2akit.schema import DIRECT_REPLY_KEY, DirectReply, StreamEvent
+from a2akit.schema import DIRECT_REPLY_KEY, DirectReply, StreamEvent, TerminalMarker
 from a2akit.storage.base import (
     TERMINAL_STATES,
     ConcurrencyError,
@@ -50,14 +39,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _is_agent_role(role: str | Role | None) -> bool:
-    """Check whether a role value represents the agent role."""
+def _is_blocking(cfg: v10.SendMessageConfiguration | None) -> bool:
+    """Map v10.SendMessageConfiguration.return_immediately → the blocking semantics.
+
+    v0.3 had ``blocking: bool`` (default True = wait). v10 inverts this to
+    ``return_immediately: bool``. Per spec the v10 default is "wait" (same
+    behaviour), so we treat unset as blocking.
+    """
+    if cfg is None or cfg.return_immediately is None:
+        return True
+    return not cfg.return_immediately
+
+
+def _is_agent_role(role: str | v10.Role | None) -> bool:
+    """Check whether a role value represents the agent role.
+
+    v10 enum members are ``role_user`` / ``role_agent`` with value strings
+    ``ROLE_USER`` / ``ROLE_AGENT``. Accept both the raw v10 enum and the
+    v0.3 legacy ``"agent"`` string for robustness across the v0.3-compat
+    boundary (section 11).
+    """
     if role is None:
         return False
-    return role == "agent" or getattr(role, "value", None) == "agent"
+    if isinstance(role, v10.Role):
+        return bool(role == v10.Role.role_agent)
+    return role in {"agent", "ROLE_AGENT", "role_agent"}
 
 
-def _find_direct_reply(task: Task) -> Message | None:
+def _find_direct_reply(task: v10.Task) -> v10.Message | None:
     """Extract direct-reply message if the worker used ``reply_directly()``.
 
     Checks ``task.metadata`` for the ``_a2akit_direct_reply`` marker
@@ -73,6 +82,64 @@ def _find_direct_reply(task: Task) -> Message | None:
     for msg in reversed(task.history):
         if getattr(msg, "message_id", None) == direct_reply_msg_id:
             return msg
+    return None
+
+
+def _extract_inline_push_config(params: Any) -> Any:
+    """Return the inline push config from ``SendMessageRequest.configuration``.
+
+    Accepts both shapes so this code works whether the caller passed a v1.0
+    ``SendMessageConfiguration`` (flat ``task_push_notification_config``
+    carrying a ``v10.TaskPushNotificationConfig``) or a legacy v0.3
+    ``MessageSendConfiguration`` (nested ``push_notification_config``
+    carrying a bare webhook payload). Returns a framework-level
+    ``PushNotificationConfig`` ready to hand to ``push_store.set_config``.
+    """
+    from a2akit.push.models import (
+        PushNotificationAuthenticationInfo,
+        PushNotificationConfig,
+    )
+
+    cfg = getattr(params, "configuration", None)
+    if cfg is None:
+        return None
+
+    # v1.0 flat shape: configuration.task_push_notification_config
+    tpnc = getattr(cfg, "task_push_notification_config", None)
+    if tpnc is not None:
+        auth = None
+        tpnc_auth = getattr(tpnc, "authentication", None)
+        if tpnc_auth is not None:
+            scheme = getattr(tpnc_auth, "scheme", None)
+            auth = PushNotificationAuthenticationInfo(
+                schemes=[scheme] if scheme else [],
+                credentials=getattr(tpnc_auth, "credentials", None),
+            )
+        return PushNotificationConfig(
+            id=getattr(tpnc, "id", None),
+            url=tpnc.url,
+            token=getattr(tpnc, "token", None),
+            authentication=auth,
+        )
+
+    # v0.3 nested shape: configuration.push_notification_config (bare webhook payload).
+    pnc = getattr(cfg, "push_notification_config", None)
+    if pnc is not None:
+        auth = None
+        pnc_auth = getattr(pnc, "authentication", None)
+        if pnc_auth is not None:
+            schemes = list(getattr(pnc_auth, "schemes", None) or [])
+            auth = PushNotificationAuthenticationInfo(
+                schemes=schemes,
+                credentials=getattr(pnc_auth, "credentials", None),
+            )
+        return PushNotificationConfig(
+            id=getattr(pnc, "id", None),
+            url=pnc.url,
+            token=getattr(pnc, "token", None),
+            authentication=auth,
+        )
+
     return None
 
 
@@ -124,17 +191,17 @@ class TaskManager:
             logger.error("Broker enqueue failed for task %s, marking as failed", task_id)
             try:
                 task = await self.storage.load_task(task_id)
-                error_msg = Message(
-                    role=Role.agent,
-                    parts=[Part(TextPart(text="Failed to enqueue task"))],
+                error_msg = v10.Message(
+                    role=v10.Role.role_agent,
+                    parts=[v10.Part(text="Failed to enqueue task")],
                     message_id=str(uuid.uuid4()),
                     task_id=task_id,
-                    context_id=task.context_id if task else None,
+                    context_id=task.context_id if task else "",
                 )
                 emitter = self.emitter or DefaultEventEmitter(self.event_bus, self.storage)
                 await emitter.update_task(
                     task_id,
-                    state=TaskState.failed,
+                    state=v10.TaskState.task_state_failed,
                     status_message=error_msg,
                     messages=[error_msg],
                 )
@@ -142,36 +209,39 @@ class TaskManager:
                 if task is not None:
                     await emitter.send_event(
                         task_id,
-                        TaskStatusUpdateEvent(
-                            kind="status-update",
-                            task_id=task_id,
-                            context_id=task.context_id or "",
-                            status=task.status,
-                            final=True,
+                        TerminalMarker(
+                            event=v10.TaskStatusUpdateEvent(
+                                task_id=task_id,
+                                context_id=task.context_id or "",
+                                status=task.status,
+                            )
                         ),
                     )
             except Exception:
                 logger.exception("Could not mark task %s as failed after broker error", task_id)
 
-    def _validate_input_modes(self, message: Message) -> None:
-        """Validate message parts against declared input modes (A2A §8.2 -32005)."""
+    def _validate_input_modes(self, message: v10.Message) -> None:
+        """Validate message parts against declared input modes (A2A §8.2 -32005).
+
+        v10 drops TextPart/FilePart/DataPart — use flat ``part_kind`` and
+        ``media_type`` attributes from v10.Part instead.
+        """
         if not self.input_modes:
             return
         for part in message.parts:
-            root = getattr(part, "root", part)
-            if isinstance(root, TextPart):
+            kind = part_kind(part)
+            if kind == "text":
                 effective = "text/plain"
-            elif isinstance(root, DataPart):
-                effective = "application/json"
-            elif isinstance(root, FilePart):
-                f = root.file
-                effective = getattr(f, "mime_type", None) or "application/octet-stream"
+            elif kind == "data":
+                effective = part.media_type or "application/json"
+            elif kind in ("raw", "url"):
+                effective = part.media_type or "application/octet-stream"
             else:
                 continue
             if effective not in self.input_modes:
                 raise ContentTypeNotSupportedError(effective)
 
-    async def _submit_task(self, context_id: str, message: Message) -> tuple[Task, bool]:
+    async def _submit_task(self, context_id: str, message: v10.Message) -> tuple[v10.Task, bool]:
         """Route, validate, and persist a user message submission.
 
         Returns ``(task, should_enqueue)``.  ``should_enqueue`` is False
@@ -200,7 +270,10 @@ class TaskManager:
             # submitted state — that would cause a double enqueue on
             # client retries, and on multi-worker Redis deployments two
             # workers could process the same task in parallel.
-            just_created = bool(task.metadata and task.metadata.pop("_a2akit_just_created", False))
+            md: dict[str, Any] = dict(task.metadata or {})
+            just_created = bool(md.pop("_a2akit_just_created", False))
+            # a2a-pydantic ≥0.0.6 coerces dict → Struct on assignment.
+            task.metadata = md or None
             return task, just_created
 
         # Capture the OCC version BEFORE loading and validating state.
@@ -252,19 +325,19 @@ class TaskManager:
         # Broadcast the transition so SSE subscribers, hooks, and push
         # notifications see the state change (this is the mirror image of
         # what WorkerAdapter does after transitioning submitted -> working).
+        # v10: no `kind` / `final` fields on the event — intermediate state
+        # updates go on the wire as bare TaskStatusUpdateEvent.
         if new_state is not None:
-            status = TaskStatus(
+            status = v10.TaskStatus(
                 state=new_state,
                 timestamp=datetime.now(UTC).isoformat(),
             )
             await emitter.send_event(
                 task.id,
-                TaskStatusUpdateEvent(
-                    kind="status-update",
+                v10.TaskStatusUpdateEvent(
                     task_id=task.id,
                     context_id=task.context_id,
                     status=status,
-                    final=False,
                 ),
             )
         # Re-load to return the updated Task object.
@@ -273,7 +346,7 @@ class TaskManager:
             raise RuntimeError(f"Task {task.id} vanished after update")
         return updated, True
 
-    async def _load_and_validate(self, message: Message) -> Task:
+    async def _load_and_validate(self, message: v10.Message) -> v10.Task:
         """Load task and enforce all preconditions.
 
         Raises:
@@ -299,31 +372,31 @@ class TaskManager:
                 f"task {message.task_id!r} contextId {task.context_id!r}"
             )
 
+        # v1.0 drops the TaskState.unknown sentinel — only the two interrupt
+        # states accept user follow-ups without a prior role=agent handoff.
         if current not in {
-            TaskState.input_required,
-            TaskState.auth_required,
-            TaskState.unknown,
+            v10.TaskState.task_state_input_required,
+            v10.TaskState.task_state_auth_required,
         } and not _is_agent_role(getattr(message, "role", None)):
             raise TaskNotAcceptingMessagesError(current)
 
         return task
 
     @staticmethod
-    def _compute_state_transition(task: Task) -> TaskState | None:
+    def _compute_state_transition(task: v10.Task) -> v10.TaskState | None:
         """Determine the new state based on current task state."""
         if task.status.state in {
-            TaskState.input_required,
-            TaskState.auth_required,
-            TaskState.unknown,
+            v10.TaskState.task_state_input_required,
+            v10.TaskState.task_state_auth_required,
         }:
-            return TaskState.submitted
+            return v10.TaskState.task_state_submitted
         return None
 
     async def send_message(
         self,
-        params: MessageSendParams,
+        params: v10.SendMessageRequest,
         request_context: dict[str, Any] | None = None,
-    ) -> Task | Message:
+    ) -> v10.Task | v10.Message:
         """Submit a task and optionally block until completion.
 
         Returns a ``Message`` when the worker used ``reply_directly()``
@@ -334,6 +407,18 @@ class TaskManager:
         is_new = not msg.task_id
         context_id = msg.context_id or str(uuid.uuid4())
         task, should_enqueue = await self._submit_task(context_id, msg)
+
+        # Persist the tenant from the v10 request onto the task's metadata so
+        # ``list_tasks(tenant=...)`` can filter on it later. v10.Message itself
+        # has no tenant field, so the only place it's authoritative is
+        # ``SendMessageRequest.tenant``.
+        if is_new and should_enqueue and params.tenant:
+            from a2akit.storage.base import META_TENANT_KEY
+
+            await self.storage.update_task(
+                task.id,
+                task_metadata={META_TENANT_KEY: params.tenant},
+            )
 
         # Follow-up: use the task's real context_id, not the generated one
         if not is_new:
@@ -355,21 +440,19 @@ class TaskManager:
                 return trimmed or latest_full or task
             return latest_full or task
 
-        # Inline push notification config (A2A spec)
-        if params.configuration and hasattr(params.configuration, "push_notification_config"):
-            pnc = params.configuration.push_notification_config
-            if pnc is not None and self.push_store is not None:
-                from a2akit.push.models import PushNotificationConfig
-
-                config = PushNotificationConfig.model_validate(
-                    pnc if isinstance(pnc, dict) else pnc.model_dump(by_alias=True)
-                )
-                await self.push_store.set_config(task.id, config)
+        # Inline push notification config (A2A v1.0 §3.2.2). The wire model is
+        # the flat ``v10.TaskPushNotificationConfig``; we map it onto the
+        # framework's :class:`PushNotificationConfig` (which is v1.0-aligned:
+        # flat URL/token/authentication, single-scheme wrapping).
+        if self.push_store is not None:
+            inline = _extract_inline_push_config(params)
+            if inline is not None:
+                await self.push_store.set_config(task.id, inline)
 
         params = self._bind_message(params, context_id, task.id)
 
-        direct_message: Message | None = None
-        if params.configuration and params.configuration.blocking:
+        direct_message: v10.Message | None = None
+        if _is_blocking(params.configuration):
             # Subscribe BEFORE starting broker to avoid race condition:
             # events published between broker.run_task and subscribe would
             # be lost if we subscribed after.
@@ -390,7 +473,7 @@ class TaskManager:
                         async for _eid, ev in sub:
                             if isinstance(ev, DirectReply):
                                 direct_message = ev.message
-                            if isinstance(ev, TaskStatusUpdateEvent) and ev.final:
+                            if isinstance(ev, TerminalMarker):
                                 break
                 except TimeoutError:
                     logger.info("Blocking wait timed out for task %s", task.id)
@@ -427,11 +510,11 @@ class TaskManager:
 
     @staticmethod
     def _bind_message(
-        params: MessageSendParams, context_id: str, task_id: str
-    ) -> MessageSendParams:
+        params: v10.SendMessageRequest, context_id: str, task_id: str
+    ) -> v10.SendMessageRequest:
         """Return a copy of params with context_id and task_id bound.
 
-        Avoids mutating the caller's MessageSendParams object.
+        Avoids mutating the caller's SendMessageRequest object.
         """
         updated_msg = params.message.model_copy(
             update={"context_id": context_id, "task_id": task_id}
@@ -440,7 +523,7 @@ class TaskManager:
 
     async def stream_message(
         self,
-        params: MessageSendParams,
+        params: v10.SendMessageRequest,
         request_context: dict[str, Any] | None = None,
     ) -> AsyncGenerator[tuple[str | None, StreamEvent], None]:
         """Submit a task, yield initial snapshot, then stream live events.
@@ -463,15 +546,10 @@ class TaskManager:
             context_id = task.context_id
 
         # REQ-08: Inline push notification config on message/stream.
-        if params.configuration and hasattr(params.configuration, "push_notification_config"):
-            pnc = params.configuration.push_notification_config
-            if pnc is not None and self.push_store is not None:
-                from a2akit.push.models import PushNotificationConfig
-
-                config = PushNotificationConfig.model_validate(
-                    pnc if isinstance(pnc, dict) else pnc.model_dump(by_alias=True)
-                )
-                await self.push_store.set_config(task.id, config)
+        if self.push_store is not None:
+            inline = _extract_inline_push_config(params)
+            if inline is not None:
+                await self.push_store.set_config(task.id, inline)
 
         history_len = getattr(getattr(params, "configuration", None), "history_length", None)
         if history_len is not None:
@@ -551,7 +629,7 @@ class TaskManager:
             async for event_id, ev in sub:
                 yield (event_id, ev)
 
-    async def get_task(self, task_id: str, history_length: int | None = None) -> Task | None:
+    async def get_task(self, task_id: str, history_length: int | None = None) -> v10.Task | None:
         """Load a single task by ID."""
         return await self.storage.load_task(task_id, history_length)
 
@@ -559,7 +637,7 @@ class TaskManager:
         """Return filtered and paginated tasks."""
         return await self.storage.list_tasks(query)
 
-    async def cancel_task(self, task_id: str) -> Task:
+    async def cancel_task(self, task_id: str) -> v10.Task:
         """Request cancellation of a task and return its current state.
 
         Signals the cancel registry so the worker can cooperatively cancel.

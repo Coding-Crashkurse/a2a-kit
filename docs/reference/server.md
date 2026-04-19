@@ -131,7 +131,7 @@ User-friendly configuration for the agent discovery card.
 | `name` | `str` | *required* | Agent name |
 | `description` | `str` | *required* | Agent description |
 | `version` | `str` | `"1.0.0"` | Agent version |
-| `protocol_version` | `str` | `"0.3.0"` | A2A protocol version |
+| `protocol_version` | `str` | `"0.3.0"` | A2A protocol version advertised on the card. Independent of `A2AServer(protocol_version=...)`, which picks the wire format(s) to serve (default: `"1.0"`). |
 | `skills` | `list[SkillConfig]` | `[]` | Agent skills |
 | `extensions` | `list[ExtensionConfig]` | `[]` | Agent extensions |
 | `capabilities` | `CapabilitiesConfig` | `CapabilitiesConfig()` | Agent capabilities (see below) |

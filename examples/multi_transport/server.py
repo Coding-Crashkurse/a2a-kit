@@ -7,10 +7,10 @@ Test:
     # JSON-RPC (preferred)
     python examples/multi_transport/client.py
 
-    # REST
-    curl -X POST http://localhost:8000/v1/message:send \
+    # REST (A2A v1.0 — bare path, flat Part, uppercase role)
+    curl -X POST http://localhost:8000/message:send \
          -H "Content-Type: application/json" \
-         -d '{"message": {"role": "user", "parts": [{"kind": "text", "text": "Hello"}], "messageId": "1"}}'
+         -d '{"message": {"role": "ROLE_USER", "parts": [{"text": "Hello"}], "messageId": "1"}}'
 """
 
 import uvicorn

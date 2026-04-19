@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from a2a.types import Message, TaskState
+    from a2a_pydantic import v10
 
     from a2akit.event_bus.base import EventBus
     from a2akit.schema import StreamEvent
@@ -35,11 +35,11 @@ class EventEmitter(ABC):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState | None = None,
+        state: v10.TaskState | None = None,
         *,
-        status_message: Message | None = None,
+        status_message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
-        messages: list[Message] | None = None,
+        messages: list[v10.Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:
@@ -85,11 +85,11 @@ class DefaultEventEmitter(EventEmitter):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState | None = None,
+        state: v10.TaskState | None = None,
         *,
-        status_message: Message | None = None,
+        status_message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
-        messages: list[Message] | None = None,
+        messages: list[v10.Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:

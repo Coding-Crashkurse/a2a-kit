@@ -5,7 +5,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-from a2a.types import Message, Part, Role, TaskState, TextPart
+from a2a.types import Message, Part, Role, TextPart
+from a2a_pydantic.v10 import TaskState
 
 from a2akit.hooks import HookableEmitter, LifecycleHooks
 
@@ -63,10 +64,10 @@ class TestLifecycleHooksDefaults:
 @pytest.mark.parametrize(
     "terminal_state",
     [
-        TaskState.completed,
-        TaskState.failed,
-        TaskState.canceled,
-        TaskState.rejected,
+        TaskState.task_state_completed,
+        TaskState.task_state_failed,
+        TaskState.task_state_canceled,
+        TaskState.task_state_rejected,
     ],
 )
 class TestHookableEmitterTerminalStates:
@@ -96,7 +97,7 @@ class TestHookableEmitterWorking:
         hook = AsyncMock()
         em = HookableEmitter(inner, LifecycleHooks(on_working=hook))
 
-        await em.update_task("task-1", state=TaskState.working)
+        await em.update_task("task-1", state=TaskState.task_state_working)
 
         hook.assert_awaited_once_with("task-1")
 
@@ -105,14 +106,14 @@ class TestHookableEmitterWorking:
         hook = AsyncMock()
         em = HookableEmitter(inner, LifecycleHooks(on_working=hook))
 
-        await em.update_task("task-1", state=TaskState.completed)
+        await em.update_task("task-1", state=TaskState.task_state_completed)
 
         hook.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
     "turn_end_state",
-    [TaskState.input_required, TaskState.auth_required],
+    [TaskState.task_state_input_required, TaskState.task_state_auth_required],
 )
 class TestHookableEmitterTurnEnd:
     """on_turn_end fires for input_required and auth_required."""
@@ -136,14 +137,14 @@ class TestHookableEmitterStateChange:
     @pytest.mark.parametrize(
         "state",
         [
-            TaskState.working,
-            TaskState.completed,
-            TaskState.failed,
-            TaskState.canceled,
-            TaskState.rejected,
-            TaskState.input_required,
-            TaskState.auth_required,
-            TaskState.submitted,
+            TaskState.task_state_working,
+            TaskState.task_state_completed,
+            TaskState.task_state_failed,
+            TaskState.task_state_canceled,
+            TaskState.task_state_rejected,
+            TaskState.task_state_input_required,
+            TaskState.task_state_auth_required,
+            TaskState.task_state_submitted,
         ],
     )
     async def test_hookable_emitter_fires_on_state_change_for_all(
@@ -167,10 +168,10 @@ class TestHookableEmitterStateChange:
         em = HookableEmitter(inner, LifecycleHooks(on_state_change=sc_hook, on_terminal=t_hook))
 
         msg = _make_message()
-        await em.update_task("task-1", state=TaskState.completed, status_message=msg)
+        await em.update_task("task-1", state=TaskState.task_state_completed, status_message=msg)
 
-        sc_hook.assert_awaited_once_with("task-1", TaskState.completed, msg)
-        t_hook.assert_awaited_once_with("task-1", TaskState.completed, msg)
+        sc_hook.assert_awaited_once_with("task-1", TaskState.task_state_completed, msg)
+        t_hook.assert_awaited_once_with("task-1", TaskState.task_state_completed, msg)
 
     async def test_hookable_emitter_state_change_and_working_both_fire(
         self, inner: AsyncMock
@@ -180,9 +181,9 @@ class TestHookableEmitterStateChange:
         w_hook = AsyncMock()
         em = HookableEmitter(inner, LifecycleHooks(on_state_change=sc_hook, on_working=w_hook))
 
-        await em.update_task("task-1", state=TaskState.working)
+        await em.update_task("task-1", state=TaskState.task_state_working)
 
-        sc_hook.assert_awaited_once_with("task-1", TaskState.working, None)
+        sc_hook.assert_awaited_once_with("task-1", TaskState.task_state_working, None)
         w_hook.assert_awaited_once_with("task-1")
 
 
@@ -227,7 +228,7 @@ class TestHookableEmitterErrorHandling:
         em = HookableEmitter(inner, hooks)
 
         with pytest.raises(RuntimeError, match="storage boom"):
-            await em.update_task("task-1", state=TaskState.completed)
+            await em.update_task("task-1", state=TaskState.task_state_completed)
 
         hook.assert_not_awaited()
 
@@ -238,7 +239,7 @@ class TestHookableEmitterErrorHandling:
         hook.side_effect = ValueError("hook boom")
         em = HookableEmitter(inner, LifecycleHooks(on_terminal=hook))
 
-        result = await em.update_task("task-1", state=TaskState.completed)
+        result = await em.update_task("task-1", state=TaskState.task_state_completed)
 
         assert result == 2
         hook.assert_awaited_once()
@@ -251,7 +252,7 @@ class TestHookableEmitterErrorHandling:
         inner.update_task.return_value = 42
         em = HookableEmitter(inner, LifecycleHooks(on_terminal=hook))
 
-        result = await em.update_task("task-1", state=TaskState.failed)
+        result = await em.update_task("task-1", state=TaskState.task_state_failed)
 
         assert result == 42
 
@@ -262,7 +263,7 @@ class TestHookableEmitterPassthrough:
     async def test_hookable_emitter_no_hooks_passthrough(self, inner: AsyncMock) -> None:
         """With hooks=None, behaves identically to inner emitter."""
         em = HookableEmitter(inner, hooks=None)
-        result = await em.update_task("task-1", state=TaskState.completed)
+        result = await em.update_task("task-1", state=TaskState.task_state_completed)
 
         assert result == 2
         inner.update_task.assert_awaited_once()
@@ -284,17 +285,19 @@ class TestHookableEmitterArguments:
     ) -> None:
         """Hook receives the status_message argument."""
         msg = _make_message("done")
-        await emitter.update_task("task-1", state=TaskState.completed, status_message=msg)
+        await emitter.update_task(
+            "task-1", state=TaskState.task_state_completed, status_message=msg
+        )
 
-        hook.assert_awaited_once_with("task-1", TaskState.completed, msg)
+        hook.assert_awaited_once_with("task-1", TaskState.task_state_completed, msg)
 
     async def test_hookable_emitter_receives_none_status_message(
         self, emitter: HookableEmitter, hook: AsyncMock
     ) -> None:
         """Hook receives None when no status_message is provided."""
-        await emitter.update_task("task-1", state=TaskState.completed)
+        await emitter.update_task("task-1", state=TaskState.task_state_completed)
 
-        hook.assert_awaited_once_with("task-1", TaskState.completed, None)
+        hook.assert_awaited_once_with("task-1", TaskState.task_state_completed, None)
 
 
 class TestHookDispatchOrder:
@@ -312,7 +315,7 @@ class TestHookDispatchOrder:
 
         em = HookableEmitter(inner, LifecycleHooks(on_state_change=sc_hook, on_terminal=t_hook))
 
-        await em.update_task("task-1", state=TaskState.completed)
+        await em.update_task("task-1", state=TaskState.task_state_completed)
 
         assert order == ["state_change", "terminal"]
 
@@ -328,7 +331,7 @@ class TestHookDispatchOrder:
 
         em = HookableEmitter(inner, LifecycleHooks(on_state_change=sc_hook, on_working=w_hook))
 
-        await em.update_task("task-1", state=TaskState.working)
+        await em.update_task("task-1", state=TaskState.task_state_working)
 
         assert order == ["state_change", "working"]
 
@@ -344,6 +347,6 @@ class TestHookDispatchOrder:
 
         em = HookableEmitter(inner, LifecycleHooks(on_state_change=sc_hook, on_turn_end=te_hook))
 
-        await em.update_task("task-1", state=TaskState.input_required)
+        await em.update_task("task-1", state=TaskState.task_state_input_required)
 
         assert order == ["state_change", "turn_end"]

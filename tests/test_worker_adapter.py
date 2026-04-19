@@ -8,12 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 from a2a.types import (
     Message,
-    MessageSendParams,
     Part,
     Role,
-    TaskState,
     TextPart,
 )
+from a2a_pydantic.v10 import SendMessageRequest, TaskState
 from asgi_lifespan import LifespanManager
 
 from a2akit import InMemoryEventBus, InMemoryStorage, TaskContext, Worker
@@ -82,14 +81,18 @@ def _make_handle(op, *, attempt=1, ack_side_effect=None, nack_side_effect=None):
 
 def _make_run_op(task_id="task-1", context_id="ctx-1"):
     """Create a _RunTask operation."""
-    msg = Message(
-        role=Role.user,
-        parts=[Part(TextPart(text="hello"))],
+    from a2a_pydantic.v10 import Message as V10Message
+    from a2a_pydantic.v10 import Part as V10Part
+    from a2a_pydantic.v10 import Role as V10Role
+
+    msg = V10Message(
+        role=V10Role.role_user,
+        parts=[V10Part(text="hello")],
         message_id=str(uuid.uuid4()),
         task_id=task_id,
         context_id=context_id,
     )
-    params = MessageSendParams(message=msg)
+    params = SendMessageRequest(message=msg)
     return _RunTask(operation="run", params=params, is_new_task=True)
 
 
@@ -132,7 +135,7 @@ async def test_poison_pill_precheck_marks_failed():
         # Task should be marked failed
         loaded = await storage.load_task(task_id)
         assert loaded is not None
-        assert loaded.status.state == TaskState.failed
+        assert loaded.status.state == TaskState.task_state_failed
 
         # Handle should have been ack'd
         handle.ack.assert_awaited_once()
@@ -204,7 +207,7 @@ async def test_nack_failure_falls_through_to_mark_failed():
 
         loaded = await storage.load_task(task_id)
         assert loaded is not None
-        assert loaded.status.state == TaskState.failed
+        assert loaded.status.state == TaskState.task_state_failed
 
 
 async def test_cooperative_cancel_marks_canceled():
@@ -246,7 +249,7 @@ async def test_cooperative_cancel_marks_canceled():
 
         loaded = await storage.load_task(task_id)
         assert loaded is not None
-        assert loaded.status.state == TaskState.canceled
+        assert loaded.status.state == TaskState.task_state_canceled
 
 
 async def test_cleanup_only_for_terminal_tasks():
@@ -293,7 +296,7 @@ async def test_cleanup_only_for_terminal_tasks():
 
         loaded = await storage.load_task(task_id)
         assert loaded is not None
-        assert loaded.status.state == TaskState.input_required
+        assert loaded.status.state == TaskState.task_state_input_required
 
         # event_bus.cleanup should NOT have been called for non-terminal
         assert task_id not in cleanup_calls
@@ -342,7 +345,7 @@ async def test_cleanup_runs_for_completed_task():
 
         loaded = await storage.load_task(task_id)
         assert loaded is not None
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
 
         # event_bus.cleanup SHOULD have been called for terminal task
         assert task_id in cleanup_calls

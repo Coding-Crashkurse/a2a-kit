@@ -20,8 +20,29 @@ class PushConfigNotFoundError(Exception):
 
 
 def _serialize_tpnc(tpnc: TaskPushNotificationConfig) -> dict[str, Any]:
-    """Serialize a TaskPushNotificationConfig to a JSON-compatible dict."""
+    """Serialize a TaskPushNotificationConfig in v1.0 flat wire shape.
+
+    v1.0 puts ``url``, ``token``, ``id``, ``authentication`` directly on the
+    ``TaskPushNotificationConfig``. This matches the internal representation.
+    """
     return tpnc.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+def _serialize_tpnc_v03(tpnc: TaskPushNotificationConfig) -> dict[str, Any]:
+    """Serialize a TaskPushNotificationConfig in v0.3 nested wire shape.
+
+    v0.3 wraps the webhook fields inside ``pushNotificationConfig`` — we
+    build that shape explicitly so the v0.3 REST + JSON-RPC endpoints emit
+    what their clients expect. Returns ``{"taskId", "pushNotificationConfig": {...}}``.
+    """
+    nested: dict[str, Any] = {"url": tpnc.url}
+    if tpnc.id is not None:
+        nested["id"] = tpnc.id
+    if tpnc.token is not None:
+        nested["token"] = tpnc.token
+    if tpnc.authentication is not None:
+        nested["authentication"] = tpnc.authentication.model_dump(mode="json", exclude_none=True)
+    return {"taskId": tpnc.task_id, "pushNotificationConfig": nested}
 
 
 async def handle_set_config(

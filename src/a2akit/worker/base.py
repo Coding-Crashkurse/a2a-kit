@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import logging
 import time
 import uuid
@@ -12,23 +11,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import anyio
-from a2a.types import (
-    Artifact,
-    DataPart,
-    FilePart,
-    FileWithBytes,
-    FileWithUri,
-    Message,
-    Part,
-    Role,
-    TaskArtifactUpdateEvent,
-    TaskState,
-    TaskStatus,
-    TaskStatusUpdateEvent,
-    TextPart,
-)
+from a2a_pydantic import v10
 
-from a2akit.schema import DIRECT_REPLY_KEY, DirectReply
+from a2akit._parts import FileInfo as _PartsFileInfo
+from a2akit._parts import extract_data, extract_files
+from a2akit.schema import DIRECT_REPLY_KEY, DirectReply, TerminalMarker
 from a2akit.storage.base import (
     TERMINAL_STATES,
     ArtifactWrite,
@@ -45,14 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class FileInfo:
-    """Read-only wrapper for file parts from the user message."""
-
-    content: bytes | None
-    url: str | None
-    filename: str | None
-    media_type: str | None
+FileInfo = _PartsFileInfo
 
 
 @dataclass(frozen=True)
@@ -61,7 +41,7 @@ class HistoryMessage:
 
     role: str
     text: str
-    parts: list[Any]
+    parts: list[v10.Part]
     message_id: str
 
 
@@ -71,7 +51,7 @@ class PreviousArtifact:
 
     artifact_id: str
     name: str | None
-    parts: list[Any]
+    parts: list[v10.Part]
 
 
 def _build_parts(
@@ -82,46 +62,25 @@ def _build_parts(
     file_url: str | None = None,
     media_type: str | None = None,
     filename: str | None = None,
-) -> list[Part]:
-    """Build a list[Part] from simple Python types.
+) -> list[v10.Part]:
+    """Build a list[v10.Part] from simple Python types.
 
     Raises:
         ValueError: If no content parameter is provided.
     """
-    parts: list[Part] = []
+    parts: list[v10.Part] = []
 
     if text is not None:
-        parts.append(Part(TextPart(text=text)))
+        parts.append(v10.Part(text=text, media_type=media_type))
 
     if data is not None:
-        parts.append(Part(DataPart(data=data)))
+        parts.append(v10.Part(data=data, media_type=media_type or "application/json"))
 
     if file_bytes is not None:
-        encoded = base64.b64encode(file_bytes).decode("ascii")
-        parts.append(
-            Part(
-                FilePart(
-                    file=FileWithBytes(
-                        bytes=encoded,
-                        mime_type=media_type,
-                        name=filename,
-                    )
-                )
-            )
-        )
+        parts.append(v10.Part(raw=file_bytes, media_type=media_type, filename=filename))
 
     if file_url is not None:
-        parts.append(
-            Part(
-                FilePart(
-                    file=FileWithUri(
-                        uri=file_url,
-                        mime_type=media_type,
-                        name=filename,
-                    )
-                )
-            )
-        )
+        parts.append(v10.Part(url=file_url, media_type=media_type, filename=filename))
 
     if not parts:
         raise ValueError(
@@ -131,39 +90,18 @@ def _build_parts(
     return parts
 
 
-def _extract_files(parts: list[Any]) -> list[FileInfo]:
-    """Extract FileInfo wrappers from raw message parts."""
-    files: list[FileInfo] = []
-    for part in parts:
-        root = getattr(part, "root", part)
-        if not isinstance(root, FilePart):
-            continue
-        f = root.file
-        content: bytes | None = None
-        url: str | None = None
-        if isinstance(f, FileWithBytes) and f.bytes:
-            content = base64.b64decode(f.bytes)
-        if isinstance(f, FileWithUri):
-            url = f.uri
-        files.append(
-            FileInfo(
-                content=content,
-                url=url,
-                filename=getattr(f, "name", None),
-                media_type=getattr(f, "mime_type", None),
-            )
-        )
-    return files
+def _extract_files(parts: list[v10.Part]) -> list[FileInfo]:
+    """Extract FileInfo wrappers from v10 message parts."""
+    return extract_files(parts)
 
 
-def _extract_data_parts(parts: list[Any]) -> list[dict[str, Any]]:
-    """Extract structured data dicts from raw message parts."""
-    result: list[dict[str, Any]] = []
-    for part in parts:
-        root = getattr(part, "root", part)
-        if isinstance(root, DataPart) and isinstance(root.data, dict):
-            result.append(root.data)
-    return result
+def _extract_data_parts(parts: list[v10.Part]) -> list[Any]:
+    """Extract structured data payloads from v10 message parts.
+
+    Returns a list of unwrapped ``v10.Value.root`` contents — typically
+    ``dict``/``list``/scalar depending on what the caller embedded.
+    """
+    return extract_data(parts)
 
 
 class TaskContext(ABC):
@@ -775,15 +713,15 @@ class TaskContextImpl(TaskContext):
         self._deferred_storage: bool = deferred_storage
 
     def _make_agent_message(
-        self, parts: list[Part], *, metadata: dict[str, Any] | None = None
-    ) -> Message:
+        self, parts: list[v10.Part], *, metadata: dict[str, Any] | None = None
+    ) -> v10.Message:
         """Create an agent Message pre-filled with task_id and context_id."""
-        return Message(
-            role=Role.agent,
+        return v10.Message(
+            role=v10.Role.role_agent,
             parts=parts,
             message_id=str(uuid.uuid4()),
             task_id=self.task_id,
-            context_id=self.context_id,
+            context_id=self.context_id or "",
             metadata=metadata if metadata is not None else {},
         )
 
@@ -870,9 +808,9 @@ class TaskContextImpl(TaskContext):
 
     async def _terminal_transition(
         self,
-        state: TaskState,
+        state: v10.TaskState,
         *,
-        message: Message | None = None,
+        message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
         task_metadata: dict[str, Any] | None = None,
         pre_events: list[Any] | None = None,
@@ -943,8 +881,13 @@ class TaskContextImpl(TaskContext):
         return _extract_files(self.parts)
 
     @property
-    def data_parts(self) -> list[dict[str, Any]]:
-        """All structured data parts from the user message."""
+    def data_parts(self) -> list[Any]:
+        """All structured data parts from the user message.
+
+        Each entry is the unwrapped content of a ``v10.Part.data`` field
+        (i.e. ``v10.Value.root``). Typically a dict/list/scalar depending on
+        what the client embedded.
+        """
         return _extract_data_parts(self.parts)
 
     @property
@@ -976,13 +919,12 @@ class TaskContextImpl(TaskContext):
         pre_events: list[Any] | None = None
 
         if text is not None:
-            artifact = Artifact(artifact_id=artifact_id, parts=[Part(TextPart(text=text))])
+            artifact = v10.Artifact(artifact_id=artifact_id, parts=[v10.Part(text=text)])
             artifacts = [ArtifactWrite(artifact)]
             pre_events = [
-                TaskArtifactUpdateEvent(
-                    kind="artifact-update",
+                v10.TaskArtifactUpdateEvent(
                     task_id=self.task_id,
-                    context_id=self.context_id,
+                    context_id=self.context_id or "",
                     artifact=artifact,
                     append=False,
                     last_chunk=True,
@@ -990,26 +932,25 @@ class TaskContextImpl(TaskContext):
             ]
 
         await self._terminal_transition(
-            TaskState.completed, artifacts=artifacts, pre_events=pre_events
+            v10.TaskState.task_state_completed, artifacts=artifacts, pre_events=pre_events
         )
 
     async def complete_json(
         self, data: dict[str, Any] | list[Any], *, artifact_id: str = "final-answer"
     ) -> None:
         """Complete task with a JSON data artifact."""
-        artifact = Artifact(
+        artifact = v10.Artifact(
             artifact_id=artifact_id,
-            parts=[Part(DataPart(data=data))],
+            parts=[v10.Part(data=data, media_type="application/json")],
             metadata={"media_type": "application/json"},
         )
         await self._terminal_transition(
-            TaskState.completed,
+            v10.TaskState.task_state_completed,
             artifacts=[ArtifactWrite(artifact)],
             pre_events=[
-                TaskArtifactUpdateEvent(
-                    kind="artifact-update",
+                v10.TaskArtifactUpdateEvent(
                     task_id=self.task_id,
-                    context_id=self.context_id,
+                    context_id=self.context_id or "",
                     artifact=artifact,
                     append=False,
                     last_chunk=True,
@@ -1019,18 +960,18 @@ class TaskContextImpl(TaskContext):
 
     async def fail(self, reason: str) -> None:
         """Mark the task as failed with an error reason."""
-        msg = self._make_agent_message([Part(TextPart(text=reason))])
-        await self._terminal_transition(TaskState.failed, message=msg)
+        msg = self._make_agent_message([v10.Part(text=reason)])
+        await self._terminal_transition(v10.TaskState.task_state_failed, message=msg)
 
     async def reject(self, reason: str | None = None) -> None:
         """Reject the task — agent decides not to perform it."""
-        msg = self._make_agent_message([Part(TextPart(text=reason or "Task rejected."))])
-        await self._terminal_transition(TaskState.rejected, message=msg)
+        msg = self._make_agent_message([v10.Part(text=reason or "Task rejected.")])
+        await self._terminal_transition(v10.TaskState.task_state_rejected, message=msg)
 
     async def request_input(self, question: str) -> None:
         """Transition to input-required state."""
-        msg = self._make_agent_message([Part(TextPart(text=question))])
-        await self._terminal_transition(TaskState.input_required, message=msg)
+        msg = self._make_agent_message([v10.Part(text=question)])
+        await self._terminal_transition(v10.TaskState.task_state_input_required, message=msg)
 
     async def request_auth(
         self,
@@ -1041,9 +982,9 @@ class TaskContextImpl(TaskContext):
         auth_url: str | None = None,
     ) -> None:
         """Transition to auth-required state for secondary credentials."""
-        parts: list[Part] = []
+        parts: list[v10.Part] = []
         if details is not None:
-            parts.append(Part(TextPart(text=details)))
+            parts.append(v10.Part(text=details))
         if schemes or credentials_hint or auth_url:
             auth_data: dict[str, Any] = {}
             if schemes:
@@ -1052,23 +993,23 @@ class TaskContextImpl(TaskContext):
                 auth_data["credentialsHint"] = credentials_hint
             if auth_url:
                 auth_data["authUrl"] = auth_url
-            parts.append(Part(DataPart(data=auth_data)))
+            parts.append(v10.Part(data=auth_data, media_type="application/json"))
         if not parts:
-            parts.append(Part(TextPart(text="Authentication required.")))
+            parts.append(v10.Part(text="Authentication required."))
         msg = self._make_agent_message(parts)
-        await self._terminal_transition(TaskState.auth_required, message=msg)
+        await self._terminal_transition(v10.TaskState.task_state_auth_required, message=msg)
 
     async def respond(self, text: str | None = None) -> None:
         """Complete the task with a status message (no artifact created)."""
-        msg_parts = [Part(TextPart(text=text))] if text is not None else []
+        msg_parts = [v10.Part(text=text)] if text is not None else []
         msg = self._make_agent_message(msg_parts)
-        await self._terminal_transition(TaskState.completed, message=msg)
+        await self._terminal_transition(v10.TaskState.task_state_completed, message=msg)
 
     async def reply_directly(self, text: str) -> None:
         """Return a Message directly without task tracking."""
-        message = self._make_agent_message([Part(TextPart(text=text))])
+        message = self._make_agent_message([v10.Part(text=text)])
         await self._terminal_transition(
-            TaskState.completed,
+            v10.TaskState.task_state_completed,
             message=message,
             task_metadata={DIRECT_REPLY_KEY: message.message_id},
             pre_events=[DirectReply(message=message)],
@@ -1081,10 +1022,10 @@ class TaskContextImpl(TaskContext):
             return
         status_msg = None
         if message is not None:
-            status_msg = self._make_agent_message([Part(TextPart(text=message))])
+            status_msg = self._make_agent_message([v10.Part(text=message)])
 
-        # SSE first — streaming clients see status immediately
-        await self._emit_status(TaskState.working, message=status_msg, final=False)
+        # SSE first — streaming clients see status immediately (not terminal).
+        await self._emit_status(v10.TaskState.task_state_working, message=status_msg, final=False)
 
         # Flush pending artifacts together with the status write.
         # Intentionally omit state= to avoid duplicate stateTransitions
@@ -1145,10 +1086,10 @@ class TaskContextImpl(TaskContext):
             media_type=media_type,
             filename=filename,
         )
-        artifact = Artifact(
+        artifact = v10.Artifact(
             artifact_id=artifact_id,
-            name=name,
-            description=description,
+            name=name or "",
+            description=description or "",
             parts=parts,
             metadata=metadata,
             extensions=extensions,
@@ -1157,10 +1098,9 @@ class TaskContextImpl(TaskContext):
         # SSE first — streaming clients see every chunk immediately
         await self._emitter.send_event(
             self.task_id,
-            TaskArtifactUpdateEvent(
-                kind="artifact-update",
+            v10.TaskArtifactUpdateEvent(
                 task_id=self.task_id,
-                context_id=self.context_id,
+                context_id=self.context_id or "",
                 artifact=artifact,
                 append=append,
                 last_chunk=last_chunk,
@@ -1173,61 +1113,64 @@ class TaskContextImpl(TaskContext):
 
     async def _emit_status(
         self,
-        state: TaskState,
+        state: v10.TaskState,
         *,
-        message: Message | None = None,
+        message: v10.Message | None = None,
         message_text: str | None = None,
         final: bool | None = None,
     ) -> None:
         """Build and broadcast a TaskStatusUpdateEvent.
 
         ``final`` controls whether the SSE stream ends after this event.
-        It does NOT mean the task has reached a terminal state.  States
-        like ``auth_required`` and ``input_required`` set ``final=True``
-        because the client must reconnect after these responses, even
-        though the task itself is not terminal.
+        v1.0 drops the ``final`` field on the wire — internally we wrap
+        terminal events in :class:`TerminalMarker` so stream consumers know
+        when to close (the v0.3 compat layer reads that marker to set
+        ``final=True`` on its outbound v03 event).
 
-        When ``message`` is provided, it is used directly (reusing the
+        States like ``auth_required`` and ``input_required`` are stream-
+        terminal (the client must reconnect) even though the task itself
+        is not in a spec-defined terminal state.
+
+        When ``message`` is provided it is used directly (reusing the
         persisted message for consistency between SSE and polling).
-        When only ``message_text`` is provided, a new ephemeral message
+        When only ``message_text`` is provided a new ephemeral message
         is created (appropriate for intermediate status updates).
         """
         if final is None:
             final = state in {
-                TaskState.completed,
-                TaskState.failed,
-                TaskState.canceled,
-                TaskState.rejected,
-                TaskState.auth_required,
-                TaskState.input_required,
+                v10.TaskState.task_state_completed,
+                v10.TaskState.task_state_failed,
+                v10.TaskState.task_state_canceled,
+                v10.TaskState.task_state_rejected,
+                v10.TaskState.task_state_auth_required,
+                v10.TaskState.task_state_input_required,
             }
 
         status_message = message
         if status_message is None and message_text:
-            status_message = Message(
-                role=Role.agent,
-                parts=[Part(TextPart(text=message_text))],
+            status_message = v10.Message(
+                role=v10.Role.role_agent,
+                parts=[v10.Part(text=message_text)],
                 message_id=str(uuid.uuid4()),
                 task_id=self.task_id,
-                context_id=self.context_id,
+                context_id=self.context_id or "",
                 metadata=self.metadata,
             )
 
-        status = TaskStatus(
+        status = v10.TaskStatus(
             state=state,
             timestamp=datetime.now(UTC).isoformat(),
             message=status_message,
         )
-        await self._emitter.send_event(
-            self.task_id,
-            TaskStatusUpdateEvent(
-                kind="status-update",
-                task_id=self.task_id,
-                context_id=self.context_id,
-                status=status,
-                final=final,
-            ),
+        event = v10.TaskStatusUpdateEvent(
+            task_id=self.task_id,
+            context_id=self.context_id or "",
+            status=status,
         )
+        if final:
+            await self._emitter.send_event(self.task_id, TerminalMarker(event=event))
+        else:
+            await self._emitter.send_event(self.task_id, event)
 
     # Context operations bypass EventEmitter intentionally:
     # - Context is per-user state, not task state

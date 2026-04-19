@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from a2a.types import Message, MessageSendParams, Task
+    from a2a_pydantic import v10
     from fastapi import Request
 
 
@@ -19,18 +19,24 @@ class RequestEnvelope:
     ``context`` is transient and discarded after the Worker finishes.
 
     Attributes:
-        params: The A2A protocol payload. Persisted by Storage. May be
-                ``None`` on non-message endpoints (e.g. ``tasks/get``,
-                ``tasks/cancel``) where the framework runs the middleware
-                pipeline purely for cross-cutting concerns like auth.
-                Middleware that depends on ``params`` MUST guard against
+        params: The A2A protocol payload (v10.SendMessageRequest). Persisted
+                by Storage. May be ``None`` on non-message endpoints (e.g.
+                ``tasks/get``, ``tasks/cancel``) where the framework runs the
+                middleware pipeline purely for cross-cutting concerns like
+                auth. Middleware that depends on ``params`` MUST guard against
                 the ``None`` case.
+        tenant: The v1.0 multi-tenant identifier, promoted to a first-class
+                attribute so middleware authors don't have to fish it out of
+                ``params.tenant`` or ``context``. Populated by v1.0 endpoints
+                from ``params.tenant`` or the AgentInterface default; always
+                ``None`` on v0.3 endpoints (v0.3 has no tenant field).
         context: Framework-internal metadata. Never persisted.
                  Populated by middleware, consumed by the Worker
                  via ``ctx.request_context``.
     """
 
-    params: MessageSendParams | None = None
+    params: v10.SendMessageRequest | None = None
+    tenant: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
 
 
@@ -67,7 +73,7 @@ class A2AMiddleware:
     async def after_dispatch(
         self,
         envelope: RequestEnvelope,
-        result: Task | Message | None = None,
+        result: v10.Task | v10.Message | None = None,
     ) -> None:
         """Called after TaskManager returns, before the HTTP response is sent.
 

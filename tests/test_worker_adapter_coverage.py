@@ -9,12 +9,14 @@ from contextlib import asynccontextmanager
 import pytest
 from a2a.types import (
     Message,
-    MessageSendParams,
     Part,
     Role,
-    TaskState,
     TextPart,
 )
+from a2a_pydantic.v10 import Message as V10Message
+from a2a_pydantic.v10 import Part as V10Part
+from a2a_pydantic.v10 import Role as V10Role
+from a2a_pydantic.v10 import SendMessageRequest, TaskState
 
 from a2akit import (
     InMemoryBroker,
@@ -26,6 +28,16 @@ from a2akit import (
 from a2akit.broker.memory import InMemoryCancelRegistry
 from a2akit.worker.adapter import WorkerAdapter
 from conftest import EchoWorker
+
+
+def _v10_msg(text: str = "hello", task_id: str = "", context_id: str = "") -> V10Message:
+    return V10Message(
+        role=V10Role.role_user,
+        parts=[V10Part(text=text)],
+        message_id=str(uuid.uuid4()),
+        task_id=task_id,
+        context_id=context_id,
+    )
 
 
 class SlowWorker(Worker):
@@ -57,12 +69,12 @@ async def test_cancel_before_work():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
 
         # Request cancel BEFORE running the worker
         await cancel_reg.request_cancel(task.id)
 
-        params = MessageSendParams(message=msg_copy)
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         async with adapter.run():
             await broker.run_task(params, is_new_task=True)
@@ -70,7 +82,7 @@ async def test_cancel_before_work():
             await asyncio.sleep(0.3)
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.canceled
+        assert loaded.status.state == TaskState.task_state_canceled
 
 
 class LockTracker:
@@ -111,8 +123,8 @@ async def test_task_lock_factory():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
-        params = MessageSendParams(message=msg_copy)
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         async with adapter.run():
             await broker.run_task(params, is_new_task=True)
@@ -122,7 +134,7 @@ async def test_task_lock_factory():
         assert lock_tracker.released
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
 
 
 async def test_max_concurrent_tasks():
@@ -145,15 +157,15 @@ async def test_max_concurrent_tasks():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
-        params = MessageSendParams(message=msg_copy)
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         async with adapter.run():
             await broker.run_task(params, is_new_task=True)
             await asyncio.sleep(0.3)
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
 
 
 async def test_cancel_before_work_task_already_terminal():
@@ -176,10 +188,10 @@ async def test_cancel_before_work_task_already_terminal():
         )
         task = await storage.create_task("ctx-1", msg)
         # Complete the task before running
-        await storage.update_task(task.id, state=TaskState.completed)
+        await storage.update_task(task.id, state=TaskState.task_state_completed)
 
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
-        params = MessageSendParams(message=msg_copy)
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         # Request cancel
         await cancel_reg.request_cancel(task.id)
@@ -190,7 +202,7 @@ async def test_cancel_before_work_task_already_terminal():
 
         loaded = await storage.load_task(task.id)
         # Should still be completed, not canceled
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
 
 
 async def test_run_task_missing_task_id():
@@ -206,13 +218,14 @@ async def test_run_task_missing_task_id():
             cancel_reg,
         )
 
-        msg = Message(
+        Message(
             role=Role.user,
             parts=[Part(TextPart(text="hello"))],
             message_id=str(uuid.uuid4()),
             # No task_id
         )
-        params = MessageSendParams(message=msg)
+        # v10 message without task_id (no-task_id case)
+        params = SendMessageRequest(message=_v10_msg())
 
         with pytest.raises(ValueError, match="task_id is missing"):
             await adapter._run_task(params)
@@ -238,17 +251,17 @@ async def test_terminal_state_during_working_transition():
         )
         task = await storage.create_task("ctx-1", msg)
         # Complete the task so working transition fails with TaskTerminalStateError
-        await storage.update_task(task.id, state=TaskState.completed)
+        await storage.update_task(task.id, state=TaskState.task_state_completed)
 
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
-        params = MessageSendParams(message=msg_copy)
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         async with adapter.run():
             await broker.run_task(params, is_new_task=True)
             await asyncio.sleep(0.3)
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
 
 
 async def test_mark_failed_concurrency_error():
@@ -265,7 +278,7 @@ async def test_mark_failed_concurrency_error():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
         # Corrupt version to cause ConcurrencyError
         storage._versions[task.id] = 999
@@ -294,8 +307,8 @@ async def test_adapter_handle_op_inner_nack_retry():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
-        params = MessageSendParams(message=msg_copy)
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         # Patch _dispatch to fail once
         original_dispatch = adapter._dispatch
@@ -317,7 +330,7 @@ async def test_adapter_handle_op_inner_nack_retry():
 
         loaded = await storage.load_task(task.id)
         # After retry, the worker should succeed
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
         assert dispatch_calls >= 2  # At least the first fail + retry
 
 
@@ -341,8 +354,8 @@ async def test_adapter_handle_op_inner_max_retries_marks_failed():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
-        params = MessageSendParams(message=msg_copy)
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         # Patch _dispatch to always fail
         async def always_fail_dispatch(op):
@@ -355,7 +368,7 @@ async def test_adapter_handle_op_inner_max_retries_marks_failed():
             await asyncio.sleep(0.5)
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.failed
+        assert loaded.status.state == TaskState.task_state_failed
 
 
 class TerminalStateErrorWorker(Worker):
@@ -389,8 +402,8 @@ async def test_adapter_handles_terminal_state_during_processing():
             message_id=str(uuid.uuid4()),
         )
         task = await storage.create_task("ctx-1", msg)
-        msg_copy = msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
-        params = MessageSendParams(message=msg_copy)
+        msg.model_copy(update={"task_id": task.id, "context_id": "ctx-1"})
+        params = SendMessageRequest(message=_v10_msg(task_id=task.id, context_id="ctx-1"))
 
         async with adapter.run():
             await broker.run_task(params, is_new_task=True)
@@ -398,4 +411,4 @@ async def test_adapter_handles_terminal_state_during_processing():
 
         loaded = await storage.load_task(task.id)
         # Task should be in completed state from first complete()
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed

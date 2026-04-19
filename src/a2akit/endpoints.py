@@ -6,18 +6,14 @@ import logging
 from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any
 
-from a2a.types import (
-    MessageSendParams,
-    Task,
-    TaskState,
-)
+from a2a_pydantic import convert_to_v03, convert_to_v10, v03, v10
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from a2akit.agent_card import AgentCardConfig, build_agent_card, external_base_url
 from a2akit.middleware import A2AMiddleware, RequestEnvelope
-from a2akit.schema import DirectReply
+from a2akit.schema import DirectReply, TerminalMarker
 from a2akit.storage.base import (
     ListTasksQuery,
     UnsupportedOperationError,
@@ -34,11 +30,14 @@ SUPPORTED_A2A_VERSION = "0.3.0"
 logger = logging.getLogger(__name__)
 
 
-def _sanitize_task_for_client(task: Task) -> Task:
+def _sanitize_task_for_client(task: v03.Task) -> v03.Task:
     """Strip framework-internal metadata keys before client serialization.
 
     Keys prefixed with ``_`` are internal (e.g. ``_a2akit_direct_reply``,
     ``_idempotency_key``) and must not leak to external clients.
+
+    Operates on v0.3 Task (post-``convert_to_v03``) — we convert once at the
+    wire boundary and then treat the wire shape uniformly.
     """
     md = task.metadata
     if not md:
@@ -49,17 +48,41 @@ def _sanitize_task_for_client(task: Task) -> Task:
     return task.model_copy(update={"metadata": cleaned or None})
 
 
-def _wrap_stream_event(event: StreamEvent) -> str:
-    """Serialize a stream event for SSE (HTTP+JSON/REST transport).
+def _v10_to_v03_wire(event: StreamEvent) -> tuple[Any, bool]:
+    """Convert a v10 internal StreamEvent to its v0.3 wire object.
 
-    REST transport uses the object's ``kind`` field as discriminator.
-    No wrapper envelope needed (unlike JSON-RPC transport).
+    Returns ``(v03_object_or_None, final_flag)``. ``final_flag`` is True for
+    TerminalMarker-wrapped events so the endpoint can set ``final=True`` on
+    the resulting v03.TaskStatusUpdateEvent. ``v03_object_or_None`` is None
+    for DirectReply (handled separately by the caller).
     """
     if isinstance(event, DirectReply):
-        return event.message.model_dump_json(by_alias=True, exclude_none=True)
-    if isinstance(event, Task):
-        event = _sanitize_task_for_client(event)
-    return event.model_dump_json(by_alias=True, exclude_none=True)
+        return (convert_to_v03(event.message), False)
+    if isinstance(event, TerminalMarker):
+        v03_ev = convert_to_v03(event.event)
+        # v0.3 TaskStatusUpdateEvent has ``final: bool``; set it so the
+        # legacy wire stream knows this is the closing event.
+        v03_ev = v03_ev.model_copy(update={"final": True})
+        return (v03_ev, True)
+    return (convert_to_v03(event), False)
+
+
+def _wrap_stream_event(event: StreamEvent) -> str | None:
+    """Serialize a stream event for SSE (HTTP+JSON/REST v0.3 transport).
+
+    Returns None for events that should not be emitted on the v0.3 wire
+    (e.g. v10-only events that don't round-trip cleanly). The caller skips
+    those.
+    """
+    if isinstance(event, DirectReply):
+        v03_msg = convert_to_v03(event.message)
+        return str(v03_msg.model_dump_json(by_alias=True, exclude_none=True))
+    v03_obj, _final = _v10_to_v03_wire(event)
+    if v03_obj is None:
+        return None
+    if isinstance(v03_obj, v03.Task):
+        v03_obj = _sanitize_task_for_client(v03_obj)
+    return str(v03_obj.model_dump_json(by_alias=True, exclude_none=True))
 
 
 def _check_a2a_version(
@@ -149,7 +172,7 @@ def _get_storage(request: Request) -> Any:
     return storage
 
 
-def _validate_ids(params: MessageSendParams) -> MessageSendParams:
+def _validate_ids(params: v03.MessageSendParams) -> v03.MessageSendParams:
     """Validate that messageId is present."""
     msg = params.message
     if not msg.message_id or not msg.message_id.strip():
@@ -224,7 +247,7 @@ async def _enforce_middleware_pipeline(
 
 async def _stream_setup(
     request: Request,
-    params: MessageSendParams,
+    params: v03.MessageSendParams,
 ) -> AsyncGenerator[
     tuple[
         tuple[str | None, StreamEvent],
@@ -248,7 +271,9 @@ async def _stream_setup(
     tm = _get_tm(request)
     middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
 
-    envelope = RequestEnvelope(params=params)
+    # Upconvert v0.3 wire body → v1.0 internal (required by v10-only TaskManager).
+    params_v10 = convert_to_v10(params)
+    envelope = RequestEnvelope(params=params_v10)
     started: list[A2AMiddleware] = []
     agen: AsyncGenerator[tuple[str | None, StreamEvent], None] | None = None
     try:
@@ -325,13 +350,15 @@ def build_a2a_router() -> APIRouter:
     )
 
     @router.post("/v1/message:send", tags=["Messages"])
-    async def message_send(request: Request, params: MessageSendParams) -> JSONResponse:
+    async def message_send(request: Request, params: v03.MessageSendParams) -> JSONResponse:
         """Submit a message and return the task or message directly."""
         params = _validate_ids(params)
         tm = _get_tm(request)
         middlewares: list[A2AMiddleware] = getattr(request.app.state, "middlewares", [])
 
-        envelope = RequestEnvelope(params=params)
+        # v0.3 wire → v1.0 internal (TaskManager is v10-only post-section-3).
+        params_v10 = convert_to_v10(params)
+        envelope = RequestEnvelope(params=params_v10)
         started: list[A2AMiddleware] = []
 
         try:
@@ -340,19 +367,21 @@ def build_a2a_router() -> APIRouter:
                 started.append(mw)
 
             assert envelope.params is not None  # message endpoints always carry params
-            result = await tm.send_message(envelope.params, request_context=envelope.context)
+            result_v10 = await tm.send_message(envelope.params, request_context=envelope.context)
         except Exception:
             for mw in reversed(started):
                 await mw.after_dispatch(envelope)
             raise
 
+        # Convert v1.0 result → v0.3 wire shape for response serialization.
+        result_v03 = convert_to_v03(result_v10)
         for mw in reversed(started):
-            await mw.after_dispatch(envelope, result)
+            await mw.after_dispatch(envelope, result_v10)
 
-        if isinstance(result, Task):
-            result = _sanitize_task_for_client(result)
+        if isinstance(result_v03, v03.Task):
+            result_v03 = _sanitize_task_for_client(result_v03)
         return JSONResponse(
-            content=result.model_dump(mode="json", by_alias=True, exclude_none=True)
+            content=result_v03.model_dump(mode="json", by_alias=True, exclude_none=True)
         )
 
     @router.post("/v1/message:stream", response_class=EventSourceResponse, tags=["Messages"])
@@ -381,11 +410,19 @@ def build_a2a_router() -> APIRouter:
         try:
             eid, first_event = first_pair
             if not isinstance(first_event, DirectReply):
-                yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=eid)
+                payload = _wrap_stream_event(first_event)
+                if payload is not None:
+                    yield ServerSentEvent(raw_data=payload, id=eid)
             async for eid, ev in agen:
                 if isinstance(ev, DirectReply):
                     continue
-                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=eid)
+                payload = _wrap_stream_event(ev)
+                if payload is not None:
+                    yield ServerSentEvent(raw_data=payload, id=eid)
+                if isinstance(ev, TerminalMarker):
+                    # v0.3 wire closes the stream after a final event; we've
+                    # already emitted it with final=True via _wrap_stream_event.
+                    break
         except Exception:
             logger.exception("SSE stream aborted")
 
@@ -397,19 +434,21 @@ def build_a2a_router() -> APIRouter:
     ) -> JSONResponse:
         """Get a single task by ID."""
         tm = _get_tm(request)
-        t = await tm.get_task(task_id, history_length)
-        if not t:
+        t_v10 = await tm.get_task(task_id, history_length)
+        if not t_v10:
             raise HTTPException(
                 status_code=404, detail={"code": -32001, "message": "Task not found"}
             )
-        t = _sanitize_task_for_client(t)
-        return JSONResponse(content=t.model_dump(mode="json", by_alias=True, exclude_none=True))
+        t_v03 = _sanitize_task_for_client(convert_to_v03(t_v10))
+        return JSONResponse(
+            content=t_v03.model_dump(mode="json", by_alias=True, exclude_none=True)
+        )
 
     @router.get("/v1/tasks", tags=["Tasks"])
     async def tasks_list(
         request: Request,
         context_id: str | None = Query(None, alias="contextId"),
-        status: TaskState | None = None,
+        status: v03.TaskState | None = None,
         page_size: int = Query(50, alias="pageSize"),
         page_token: str | None = Query(None, alias="pageToken"),
         history_length: int | None = Query(None, alias="historyLength"),
@@ -418,20 +457,31 @@ def build_a2a_router() -> APIRouter:
     ) -> JSONResponse:
         """List tasks with optional filters and pagination."""
         tm = _get_tm(request)
+        # Convert the v0.3 query-param TaskState → v10 internal TaskState.
+        # v0.3 TaskState → v10 via library dispatch (singledispatch on enum
+        # arrives as the right v10.TaskState via convert_to_v10).
+        status_v10: v10.TaskState | None = convert_to_v10(status) if status is not None else None
         query = ListTasksQuery(
             context_id=context_id,
-            status=status,
+            status=status_v10,
             page_size=page_size,
             page_token=page_token,
             history_length=history_length,
             status_timestamp_after=status_timestamp_after,
             include_artifacts=include_artifacts,
         )
-        result = await tm.list_tasks(query)
-        result.tasks = [_sanitize_task_for_client(t) for t in result.tasks]
-        return JSONResponse(
-            content=result.model_dump(mode="json", by_alias=True, exclude_none=True)
-        )
+        result_v10 = await tm.list_tasks(query)
+        # Convert each v10.Task → v03.Task, then sanitize, then serialize.
+        v03_tasks = [_sanitize_task_for_client(convert_to_v03(t)) for t in result_v10.tasks]
+        payload = {
+            "tasks": [
+                t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in v03_tasks
+            ],
+            "nextPageToken": result_v10.next_page_token,
+            "pageSize": result_v10.page_size,
+            "totalSize": result_v10.total_size,
+        }
+        return JSONResponse(content=payload)
 
     @router.post("/v1/tasks/{task_id}:cancel", tags=["Tasks"])
     async def tasks_cancel(
@@ -440,10 +490,10 @@ def build_a2a_router() -> APIRouter:
     ) -> JSONResponse:
         """Cancel a task by ID."""
         tm = _get_tm(request)
-        result = await tm.cancel_task(task_id)
-        result = _sanitize_task_for_client(result)
+        result_v10 = await tm.cancel_task(task_id)
+        result_v03 = _sanitize_task_for_client(convert_to_v03(result_v10))
         return JSONResponse(
-            content=result.model_dump(mode="json", by_alias=True, exclude_none=True)
+            content=result_v03.model_dump(mode="json", by_alias=True, exclude_none=True)
         )
 
     @router.post(
@@ -464,11 +514,17 @@ def build_a2a_router() -> APIRouter:
         first_pair, agen = setup
         try:
             eid, first_event = first_pair
-            yield ServerSentEvent(raw_data=_wrap_stream_event(first_event), id=eid)
+            payload = _wrap_stream_event(first_event)
+            if payload is not None:
+                yield ServerSentEvent(raw_data=payload, id=eid)
             async for eid, ev in agen:
                 if isinstance(ev, DirectReply):
                     continue
-                yield ServerSentEvent(raw_data=_wrap_stream_event(ev), id=eid)
+                payload = _wrap_stream_event(ev)
+                if payload is not None:
+                    yield ServerSentEvent(raw_data=payload, id=eid)
+                if isinstance(ev, TerminalMarker):
+                    break
         except Exception:
             logger.exception("SSE subscribe stream aborted")
 
@@ -479,10 +535,10 @@ def build_a2a_router() -> APIRouter:
         push_store = _get_push_store(request)
         storage = _get_storage(request)
         body = await request.json()
-        from a2akit.push.endpoints import _serialize_tpnc, handle_set_config
+        from a2akit.push.endpoints import _serialize_tpnc_v03, handle_set_config
 
         result = await handle_set_config(push_store, storage, task_id, body)
-        return JSONResponse(content=_serialize_tpnc(result))
+        return JSONResponse(content=_serialize_tpnc_v03(result))
 
     @router.get(
         "/v1/tasks/{task_id}/pushNotificationConfigs/{config_id}",
@@ -497,10 +553,10 @@ def build_a2a_router() -> APIRouter:
         _check_push_supported(request)
         push_store = _get_push_store(request)
         storage = _get_storage(request)
-        from a2akit.push.endpoints import _serialize_tpnc, handle_get_config
+        from a2akit.push.endpoints import _serialize_tpnc_v03, handle_get_config
 
         result = await handle_get_config(push_store, storage, task_id, config_id)
-        return JSONResponse(content=_serialize_tpnc(result))
+        return JSONResponse(content=_serialize_tpnc_v03(result))
 
     @router.get("/v1/tasks/{task_id}/pushNotificationConfigs", tags=["Push Notifications"])
     async def push_config_list(request: Request, task_id: str = Path()) -> JSONResponse:
@@ -508,10 +564,10 @@ def build_a2a_router() -> APIRouter:
         _check_push_supported(request)
         push_store = _get_push_store(request)
         storage = _get_storage(request)
-        from a2akit.push.endpoints import _serialize_tpnc, handle_list_configs
+        from a2akit.push.endpoints import _serialize_tpnc_v03, handle_list_configs
 
         configs = await handle_list_configs(push_store, storage, task_id)
-        return JSONResponse(content=[_serialize_tpnc(c) for c in configs])
+        return JSONResponse(content=[_serialize_tpnc_v03(c) for c in configs])
 
     @router.delete(
         "/v1/tasks/{task_id}/pushNotificationConfigs/{config_id}",
@@ -587,8 +643,14 @@ def build_a2a_router() -> APIRouter:
 def build_discovery_router(
     card_config: AgentCardConfig,
     additional_protocols: list[str] | None = None,
+    *,
+    protocol_version: Any | None = None,
 ) -> APIRouter:
-    """Build the agent card discovery router."""
+    """Build the agent card discovery router.
+
+    ``protocol_version=ProtocolVersion.V1_0`` emits a v10.AgentCard with
+    ``supported_interfaces[]``; any other value emits a v0.3 AgentCard.
+    """
 
     router = APIRouter()
 
@@ -600,7 +662,12 @@ def build_discovery_router(
             request.url.scheme,
             request.url.netloc,
         )
-        card = build_agent_card(card_config, base_url, additional_protocols)
+        card = build_agent_card(
+            card_config,
+            base_url,
+            additional_protocols,
+            protocol_version=protocol_version,
+        )
         return JSONResponse(content=card.model_dump(mode="json", by_alias=True, exclude_none=True))
 
     return router

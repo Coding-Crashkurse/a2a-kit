@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
-from a2a.types import Message, TaskState
+from a2a_pydantic.v10 import Message, TaskState
 
 from a2akit import A2AServer, AgentCardConfig, TaskContext, Worker
 from a2akit.hooks import LifecycleHooks

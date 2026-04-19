@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from a2a.types import TaskState
+from a2a_pydantic import v10
 
 from a2akit.event_emitter import EventEmitter
 from a2akit.storage.base import TERMINAL_STATES
@@ -14,14 +14,15 @@ from a2akit.storage.base import TERMINAL_STATES
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from a2a.types import Message
-
     from a2akit.storage.base import ArtifactWrite
 
 logger = logging.getLogger(__name__)
 
 # States that pause the task and wait for external input
-TURN_END_STATES: set[TaskState] = {TaskState.input_required, TaskState.auth_required}
+TURN_END_STATES: set[v10.TaskState] = {
+    v10.TaskState.task_state_input_required,
+    v10.TaskState.task_state_auth_required,
+}
 
 
 @dataclass
@@ -55,10 +56,12 @@ class LifecycleHooks:
             The consumer differentiates by state.
     """
 
-    on_state_change: Callable[[str, TaskState, Message | None], Awaitable[None]] | None = None
+    on_state_change: Callable[[str, v10.TaskState, v10.Message | None], Awaitable[None]] | None = (
+        None
+    )
     on_working: Callable[[str], Awaitable[None]] | None = None
-    on_turn_end: Callable[[str, TaskState, Message | None], Awaitable[None]] | None = None
-    on_terminal: Callable[[str, TaskState, Message | None], Awaitable[None]] | None = None
+    on_turn_end: Callable[[str, v10.TaskState, v10.Message | None], Awaitable[None]] | None = None
+    on_terminal: Callable[[str, v10.TaskState, v10.Message | None], Awaitable[None]] | None = None
 
 
 class HookableEmitter(EventEmitter):
@@ -95,11 +98,11 @@ class HookableEmitter(EventEmitter):
     async def update_task(
         self,
         task_id: str,
-        state: TaskState | None = None,
+        state: v10.TaskState | None = None,
         *,
-        status_message: Message | None = None,
+        status_message: v10.Message | None = None,
         artifacts: list[ArtifactWrite] | None = None,
-        messages: list[Message] | None = None,
+        messages: list[v10.Message] | None = None,
         task_metadata: dict[str, Any] | None = None,
         expected_version: int | None = None,
     ) -> int:
@@ -129,7 +132,7 @@ class HookableEmitter(EventEmitter):
 
             if state in TERMINAL_STATES and h.on_terminal:
                 await self._safe_call(h.on_terminal(task_id, state, status_message))
-            elif state == TaskState.working and h.on_working:
+            elif state == v10.TaskState.task_state_working and h.on_working:
                 await self._safe_call(h.on_working(task_id))
             elif state in TURN_END_STATES and h.on_turn_end:
                 await self._safe_call(h.on_turn_end(task_id, state, status_message))

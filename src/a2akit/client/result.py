@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from a2a.types import (
+from a2a_pydantic.v03 import (
     Artifact,
     DataPart,
     Message,
@@ -17,7 +17,7 @@ from a2a.types import (
 
 
 def _extract_text_from_parts(parts: list[Any]) -> str | None:
-    """Extract and join text from Part objects."""
+    """Extract and join text from v0.3 Part objects."""
     texts: list[str] = []
     for p in parts:
         inner = p.root if hasattr(p, "root") else p
@@ -27,11 +27,11 @@ def _extract_text_from_parts(parts: list[Any]) -> str | None:
 
 
 def _extract_data_from_parts(parts: list[Any]) -> dict[str, Any] | None:
-    """Extract first DataPart data from Part objects."""
+    """Extract first DataPart data from v0.3 Part objects."""
     for p in parts:
         inner = p.root if hasattr(p, "root") else p
         if isinstance(inner, DataPart):
-            return inner.data
+            return inner.data  # type: ignore[no-any-return]
     return None
 
 

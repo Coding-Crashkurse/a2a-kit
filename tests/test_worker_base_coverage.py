@@ -12,14 +12,14 @@ import pytest
 from a2a.types import (
     DataPart,
     FilePart,
-    FileWithBytes,
     FileWithUri,
     Message,
     Part,
     Role,
-    TaskState,
     TextPart,
 )
+from a2a_pydantic.v10 import Part as V10Part
+from a2a_pydantic.v10 import TaskState
 from asgi_lifespan import LifespanManager
 
 from a2akit.broker.memory import AnyioCancelScope
@@ -40,16 +40,14 @@ def test_build_parts_text():
     """_build_parts with text only."""
     parts = _build_parts(text="hello")
     assert len(parts) == 1
-    assert isinstance(parts[0].root, TextPart)
-    assert parts[0].root.text == "hello"
+    assert parts[0].text == "hello"
 
 
 def test_build_parts_data():
     """_build_parts with data only."""
     parts = _build_parts(data={"key": "value"})
     assert len(parts) == 1
-    assert isinstance(parts[0].root, DataPart)
-    assert parts[0].root.data == {"key": "value"}
+    assert parts[0].data.root == {"key": "value"}
 
 
 def test_build_parts_file_bytes():
@@ -58,13 +56,11 @@ def test_build_parts_file_bytes():
         file_bytes=b"binary data", media_type="application/pdf", filename="doc.pdf"
     )
     assert len(parts) == 1
-    root = parts[0].root
-    assert isinstance(root, FilePart)
-    assert isinstance(root.file, FileWithBytes)
-    assert root.file.name == "doc.pdf"
-    assert root.file.mime_type == "application/pdf"
+    p = parts[0]
+    assert p.filename == "doc.pdf"
+    assert p.media_type == "application/pdf"
     # Check that bytes are base64 encoded
-    decoded = base64.b64decode(root.file.bytes)
+    decoded = base64.b64decode(p.raw)
     assert decoded == b"binary data"
 
 
@@ -72,10 +68,8 @@ def test_build_parts_file_url():
     """_build_parts with file_url."""
     parts = _build_parts(file_url="https://example.com/file.pdf", media_type="application/pdf")
     assert len(parts) == 1
-    root = parts[0].root
-    assert isinstance(root, FilePart)
-    assert isinstance(root.file, FileWithUri)
-    assert root.file.uri == "https://example.com/file.pdf"
+    p = parts[0]
+    assert p.url == "https://example.com/file.pdf"
 
 
 def test_build_parts_multiple():
@@ -94,17 +88,14 @@ def test_build_parts_text_and_file():
     """_build_parts with text + file_bytes produces two parts."""
     parts = _build_parts(text="hello", file_bytes=b"data", media_type="application/octet-stream")
     assert len(parts) == 2
-    assert isinstance(parts[0].root, TextPart)
-    assert isinstance(parts[1].root, FilePart)
+    assert parts[0].text == "hello"
+    assert parts[1].raw is not None
 
 
 def test_extract_files_with_bytes():
     """_extract_files extracts FileInfo from FileWithBytes parts."""
     content = b"test content"
-    encoded = base64.b64encode(content).decode("ascii")
-    file_part = Part(
-        FilePart(file=FileWithBytes(bytes=encoded, mime_type="text/plain", name="test.txt"))
-    )
+    file_part = V10Part(raw=content, media_type="text/plain", filename="test.txt")
     files = _extract_files([file_part])
     assert len(files) == 1
     assert files[0].content == content
@@ -115,9 +106,7 @@ def test_extract_files_with_bytes():
 
 def test_extract_files_with_uri():
     """_extract_files extracts FileInfo from FileWithUri parts."""
-    file_part = Part(
-        FilePart(file=FileWithUri(uri="https://example.com/test.pdf", mime_type="application/pdf"))
-    )
+    file_part = V10Part(url="https://example.com/test.pdf", media_type="application/pdf")
     files = _extract_files([file_part])
     assert len(files) == 1
     assert files[0].url == "https://example.com/test.pdf"
@@ -128,8 +117,8 @@ def test_extract_files_with_uri():
 def test_extract_files_skips_non_file_parts():
     """_extract_files skips text and data parts."""
     parts = [
-        Part(TextPart(text="hello")),
-        Part(DataPart(data={"key": "val"})),
+        V10Part(text="hello"),
+        V10Part(data={"key": "val"}),
     ]
     files = _extract_files(parts)
     assert len(files) == 0
@@ -138,9 +127,9 @@ def test_extract_files_skips_non_file_parts():
 def test_extract_data_parts_with_dict():
     """_extract_data_parts extracts dicts from DataPart."""
     parts = [
-        Part(TextPart(text="hello")),
-        Part(DataPart(data={"key": "value"})),
-        Part(DataPart(data={"another": "dict"})),
+        V10Part(text="hello"),
+        V10Part(data={"key": "value"}),
+        V10Part(data={"another": "dict"}),
     ]
     result = _extract_data_parts(parts)
     assert len(result) == 2
@@ -151,13 +140,15 @@ def test_extract_data_parts_with_dict():
 def test_extract_data_parts_skips_text():
     """_extract_data_parts skips TextPart."""
     parts = [
-        Part(TextPart(text="just text")),
+        V10Part(text="just text"),
     ]
     result = _extract_data_parts(parts)
     assert len(result) == 0
 
 
-async def _make_ctx(storage=None, event_bus=None, state=TaskState.working, deferred_storage=False):
+async def _make_ctx(
+    storage=None, event_bus=None, state=TaskState.task_state_working, deferred_storage=False
+):
     """Helper to create a TaskContextImpl with real storage/event_bus."""
     if storage is None:
         storage = InMemoryStorage()
@@ -172,7 +163,7 @@ async def _make_ctx(storage=None, event_bus=None, state=TaskState.working, defer
         message_id=str(uuid.uuid4()),
     )
     task = await storage.create_task("ctx-1", msg)
-    if state != TaskState.submitted:
+    if state != TaskState.task_state_submitted:
         version = await storage.update_task(task.id, state=state)
     else:
         version = await storage.get_version(task.id)
@@ -212,12 +203,16 @@ async def test_ctx_files_property():
         task = await storage.create_task("ctx-1", msg)
         cancel_scope = AnyioCancelScope(anyio.Event())
 
+        v10_parts = [
+            V10Part(text="hello"),
+            V10Part(url="https://example.com/file.pdf"),
+        ]
         ctx = TaskContextImpl(
             task_id=task.id,
             context_id="ctx-1",
             message_id=msg.message_id,
             user_text="hello",
-            parts=msg.parts,
+            parts=v10_parts,
             metadata={},
             emitter=emitter,
             cancel_event=cancel_scope,
@@ -244,12 +239,16 @@ async def test_ctx_data_parts_property():
         task = await storage.create_task("ctx-1", msg)
         cancel_scope = AnyioCancelScope(anyio.Event())
 
+        v10_parts = [
+            V10Part(text="hello"),
+            V10Part(data={"key": "value"}),
+        ]
         ctx = TaskContextImpl(
             task_id=task.id,
             context_id="ctx-1",
             message_id=msg.message_id,
             user_text="hello",
-            parts=msg.parts,
+            parts=v10_parts,
             metadata={},
             emitter=emitter,
             cancel_event=cancel_scope,
@@ -322,10 +321,10 @@ async def test_versioned_update_concurrency_retry_non_terminal():
     ctx, storage, event_bus, task = await _make_ctx()
     try:
         # Bump the version externally to cause mismatch
-        await storage.update_task(task.id, state=TaskState.working)
+        await storage.update_task(task.id, state=TaskState.task_state_working)
 
         # Now ctx._version is stale, but task is non-terminal so it should retry
-        await ctx._versioned_update(task.id, state=TaskState.working)
+        await ctx._versioned_update(task.id, state=TaskState.task_state_working)
         # Should succeed after retry
     finally:
         await event_bus.__aexit__(None, None, None)
@@ -336,11 +335,11 @@ async def test_versioned_update_concurrency_terminal():
     ctx, storage, event_bus, task = await _make_ctx()
     try:
         # Complete the task and bump version
-        await storage.update_task(task.id, state=TaskState.completed)
+        await storage.update_task(task.id, state=TaskState.task_state_completed)
 
         # ctx._version is stale and task is terminal
         with pytest.raises(TaskTerminalStateError):
-            await ctx._versioned_update(task.id, state=TaskState.working)
+            await ctx._versioned_update(task.id, state=TaskState.task_state_working)
     finally:
         await event_bus.__aexit__(None, None, None)
 
@@ -364,9 +363,9 @@ async def test_emit_data_artifact():
         assert len(loaded.artifacts) == 1
         art = loaded.artifacts[0]
         assert art.artifact_id == "data-1"
-        data_parts = [p for p in art.parts if isinstance(p.root, DataPart)]
+        data_parts = [p for p in art.parts if p.data is not None]
         assert len(data_parts) == 1
-        assert data_parts[0].root.data == {"result": "ok"}
+        assert data_parts[0].data.root == {"result": "ok"}
     finally:
         await event_bus.__aexit__(None, None, None)
 
@@ -399,7 +398,7 @@ async def test_respond_no_text():
     try:
         await ctx.respond()
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
         assert ctx.turn_ended is True
     finally:
         await event_bus.__aexit__(None, None, None)
@@ -503,7 +502,7 @@ async def test_complete_drains_buffer():
 
         assert len(ctx._pending_artifacts) == 0
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
         # stream chunks + final artifact
         assert len(loaded.artifacts) >= 1
     finally:
@@ -523,7 +522,7 @@ async def test_fail_drains_buffer():
 
         assert len(ctx._pending_artifacts) == 0
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.failed
+        assert loaded.status.state == TaskState.task_state_failed
         assert len(loaded.artifacts) >= 1
     finally:
         await event_bus.__aexit__(None, None, None)
@@ -622,7 +621,7 @@ async def test_polling_sees_terminal_with_all_artifacts():
         await ctx.complete("final answer")
 
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
         # 3 streamed chunks + 1 final artifact
         assert len(loaded.artifacts) >= 1
     finally:
@@ -700,7 +699,7 @@ async def test_deferred_storage_complete_drains_all():
         # Terminal write drains everything
         assert len(ctx._pending_artifacts) == 0
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.completed
+        assert loaded.status.state == TaskState.task_state_completed
         assert len(loaded.artifacts) >= 1
     finally:
         await event_bus.__aexit__(None, None, None)
@@ -719,7 +718,7 @@ async def test_deferred_storage_fail_drains_all():
 
         assert len(ctx._pending_artifacts) == 0
         loaded = await storage.load_task(task.id)
-        assert loaded.status.state == TaskState.failed
+        assert loaded.status.state == TaskState.task_state_failed
         assert len(loaded.artifacts) >= 1
     finally:
         await event_bus.__aexit__(None, None, None)

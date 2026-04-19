@@ -11,6 +11,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from a2akit._protocol import (
+    ProtocolVersion,
+    ProtocolVersionInput,
+    resolve_protocol_version,
+)
 from a2akit.agent_card import validate_protocol
 from a2akit.broker import (
     Broker,
@@ -116,7 +121,11 @@ class A2AServer:
         settings: Settings | None = None,
         dependencies: dict[Any, Any] | None = None,
         enable_telemetry: bool | None = None,
-        # Multi-transport (Spec §3.4, §5.5)
+        # A2A protocol wire version ("1.0" default, "0.3" for legacy, or a
+        # set like {"1.0", "0.3"} to serve both on one server).
+        protocol_version: ProtocolVersionInput = None,
+        # Multi-transport (Spec §3.4, §5.5) — transport bindings like JSON-RPC
+        # or HTTP+JSON, NOT A2A wire versions.
         additional_protocols: list[str] | None = None,
         # Push notification options
         push_max_retries: int | None = None,
@@ -154,7 +163,11 @@ class A2AServer:
         self._settings = s
         self._hooks = hooks
         self._enable_telemetry = enable_telemetry
-        self._additional_protocols = additional_protocols or []
+        # a2akit serves exactly one A2A wire version per server.
+        self._protocol_version: ProtocolVersion = resolve_protocol_version(protocol_version)
+        # Transport bindings (JSON-RPC / HTTP+JSON) — distinct from A2A wire
+        # version. Named `_additional_transports` internally to avoid confusion.
+        self._additional_transports: list[str] = additional_protocols or []
         self._deps = DependencyContainer(dependencies)
         # Push notification config
         self._push_max_retries = (
@@ -178,6 +191,11 @@ class A2AServer:
         self._extended_card_provider = extended_card_provider
         if extended_card_provider is not None:
             self._card_config.supports_authenticated_extended_card = True
+
+    @property
+    def protocol_version(self) -> ProtocolVersion:
+        """The A2A wire version this server serves."""
+        return self._protocol_version
 
     def _is_telemetry_enabled(self) -> bool:
         """Determine if OTel instrumentation should be active."""
@@ -361,7 +379,13 @@ class A2AServer:
             app.state.middlewares = middlewares
             app.state.capabilities = server._card_config.capabilities
             app.state.extended_card_provider = server._extended_card_provider
-            app.state.additional_protocols = server._additional_protocols or None
+            app.state.additional_protocols = server._additional_transports or None
+            # Expose the active A2A wire versions so TracingMiddleware and
+            # downstream observability can tag spans with ``a2akit.a2a.version``
+            # (spec §12). Dual-protocol servers expose the full set; the
+            # router that handled the request refines it per-call via
+            # ``envelope.context["a2a_version"]``.
+            app.state.protocol_version = server._protocol_version
 
             await server._deps.startup()
             try:
@@ -410,13 +434,22 @@ class A2AServer:
         app.add_middleware(ContentTypeValidationMiddleware)
 
         # REQ-09: A2A-Version response header on all responses.
+        serves_v10 = self._protocol_version == ProtocolVersion.V1_0
+        version_header = "1.0" if serves_v10 else "0.3.0"
+
         @app.middleware("http")
         async def _add_a2a_version_header(request: Request, call_next: Any) -> Any:
             response = await call_next(request)
-            response.headers["A2A-Version"] = "0.3.0"
+            response.headers["A2A-Version"] = version_header
             return response
 
-        _register_exception_handlers(app)
+        # Exception handler registration — picked by the configured version.
+        if serves_v10:
+            from a2akit.endpoints_v10 import register_exception_handlers_v10
+
+            register_exception_handlers_v10(app)
+        else:
+            _register_exception_handlers(app)
 
         if debug:
             from a2akit._chat_ui import mount_chat_ui
@@ -424,28 +457,47 @@ class A2AServer:
             mount_chat_ui(app)
             logger.info("Debug UI available at /chat")
 
-        # Mount routers: preferred protocol + additional protocols
+        # Mount routers based on the configured protocol version(s).
         protocol = self._card_config.protocol
-        mounted: set[str] = set()
+        mounted_rest: set[str] = set()
+        mounted_jsonrpc: set[str] = set()
 
-        if protocol == "jsonrpc":
-            app.include_router(build_jsonrpc_router())
-            mounted.add("jsonrpc")
-        elif protocol == "http+json":
-            app.include_router(build_a2a_router())
-            mounted.add("http+json")
+        def _transports_for_protocol(primary: str, additional: list[str]) -> set[str]:
+            out = {primary.lower().replace(" ", "")}
+            for proto in additional:
+                out.add(proto.lower().replace(" ", ""))
+            return out
 
-        for proto in self._additional_protocols:
-            normalized = proto.lower().replace(" ", "")
-            if normalized in ("jsonrpc",) and "jsonrpc" not in mounted:
-                app.include_router(build_jsonrpc_router())
-                mounted.add("jsonrpc")
-            elif normalized in ("http+json", "http", "rest") and "http+json" not in mounted:
+        wanted = _transports_for_protocol(protocol, self._additional_transports)
+
+        # REST mounting — one version only.
+        if any(t in ("http+json", "http", "rest") for t in wanted):
+            if serves_v10:
+                from a2akit.endpoints_v10 import build_a2a_router_v10
+
+                app.include_router(build_a2a_router_v10())
+                mounted_rest.add("1.0")
+            else:
                 app.include_router(build_a2a_router())
-                mounted.add("http+json")
+                mounted_rest.add("0.3")
+
+        # JSON-RPC mounting — one version only.
+        if "jsonrpc" in wanted:
+            if serves_v10:
+                from a2akit.jsonrpc_v10 import build_jsonrpc_router_v10
+
+                app.include_router(build_jsonrpc_router_v10())
+                mounted_jsonrpc.add("1.0")
+            else:
+                app.include_router(build_jsonrpc_router())
+                mounted_jsonrpc.add("0.3")
 
         app.include_router(
-            build_discovery_router(self._card_config, self._additional_protocols or None)
+            build_discovery_router(
+                self._card_config,
+                self._additional_transports or None,
+                protocol_version=self._protocol_version,
+            )
         )
 
         return app

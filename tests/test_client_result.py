@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from a2a.types import (
+from a2a_pydantic.v03 import (
     Artifact,
     DataPart,
     Message,

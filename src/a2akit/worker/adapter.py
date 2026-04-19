@@ -10,19 +10,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import anyio
-from a2a.types import (
-    Message,
-    MessageSendParams,
-    Part,
-    Role,
-    TaskState,
-    TaskStatus,
-    TaskStatusUpdateEvent,
-    TextPart,
-)
+from a2a_pydantic import v10
 
 from a2akit.cancel import cancel_task_in_storage
 from a2akit.event_emitter import DefaultEventEmitter, EventEmitter
+from a2akit.schema import TerminalMarker
 from a2akit.storage.base import TERMINAL_STATES, ConcurrencyError, TaskTerminalStateError
 from a2akit.worker.context_factory import ContextFactory
 
@@ -216,7 +208,7 @@ class WorkerAdapter:
 
     async def _run_task(
         self,
-        params: MessageSendParams,
+        params: v10.SendMessageRequest,
         *,
         is_new_task: bool = False,
         request_context: dict[str, Any] | None = None,
@@ -245,7 +237,7 @@ class WorkerAdapter:
 
     async def _run_task_inner(
         self,
-        params: MessageSendParams,
+        params: v10.SendMessageRequest,
         *,
         is_new_task: bool = False,
         request_context: dict[str, Any] | None = None,
@@ -301,17 +293,25 @@ class WorkerAdapter:
                     return
 
                 cfg = getattr(params, "configuration", None)
+                # v10: non-blocking is ``return_immediately=True``. When set,
+                # the client already returned, so we can defer the status-write
+                # to the end of the turn for a small perf win.
+                return_immediately = (
+                    bool(getattr(cfg, "return_immediately", False)) if cfg is not None else False
+                )
                 ctx = await self._context_factory.build(
                     message,
                     cancel_event,
                     is_new_task=is_new_task,
                     request_context=request_context,
                     configuration=cfg,
-                    deferred_storage=cfg is not None and not getattr(cfg, "blocking", False),
+                    deferred_storage=return_immediately,
                 )
 
                 try:
-                    working_version = await emitter.update_task(task_id, state=TaskState.working)
+                    working_version = await emitter.update_task(
+                        task_id, state=v10.TaskState.task_state_working
+                    )
                 except TaskTerminalStateError:
                     return
                 except ConcurrencyError:
@@ -518,18 +518,18 @@ class WorkerAdapter:
         ``artifacts`` are written atomically with the state transition so
         buffered artifacts from a mid-run failure/cancel are not lost.
         """
-        error_message = Message(
-            role=Role.agent,
-            parts=[Part(TextPart(text=reason))],
+        error_message = v10.Message(
+            role=v10.Role.role_agent,
+            parts=[v10.Part(text=reason)],
             message_id=str(uuid.uuid4()),
             task_id=task_id,
-            context_id=context_id,
+            context_id=context_id or "",
         )
         version = await storage.get_version(task_id)
         try:
             await emitter.update_task(
                 task_id,
-                state=TaskState.failed,
+                state=v10.TaskState.task_state_failed,
                 status_message=error_message,
                 messages=[error_message],
                 artifacts=artifacts or None,
@@ -561,7 +561,7 @@ class WorkerAdapter:
             try:
                 await emitter.update_task(
                     task_id,
-                    state=TaskState.failed,
+                    state=v10.TaskState.task_state_failed,
                     status_message=error_message,
                     messages=[error_message],
                     artifacts=artifacts or None,
@@ -578,18 +578,18 @@ class WorkerAdapter:
                     except Exception:
                         logger.warning("Artifact-only fallback failed for task %s", task_id)
                 return
-        status = TaskStatus(
-            state=TaskState.failed,
+        status = v10.TaskStatus(
+            state=v10.TaskState.task_state_failed,
             timestamp=datetime.now(UTC).isoformat(),
             message=error_message,
         )
         await emitter.send_event(
             task_id,
-            TaskStatusUpdateEvent(
-                kind="status-update",
-                task_id=task_id,
-                context_id=context_id,
-                status=status,
-                final=True,
+            TerminalMarker(
+                event=v10.TaskStatusUpdateEvent(
+                    task_id=task_id,
+                    context_id=context_id or "",
+                    status=status,
+                )
             ),
         )

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from a2a.types import AgentCard, Message, MessageSendParams, Task
+    from a2a_pydantic.v03 import AgentCard, Message, MessageSendParams, Task
 
     from a2akit.client.result import StreamEvent
 

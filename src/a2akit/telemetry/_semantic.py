@@ -26,6 +26,10 @@ ATTR_MESSAGE_ID = "a2akit.message.id"
 ATTR_TASK_STATE = "a2akit.task.state"
 ATTR_AGENT_NAME = "a2akit.agent.name"
 ATTR_PROTOCOL = "a2akit.protocol"
+# A2A wire version served/consumed on this request (``"1.0"`` or ``"0.3"``),
+# distinct from ATTR_PROTOCOL which names the transport binding (JSONRPC,
+# HTTP+JSON, GRPC). Populated by TracingMiddleware from app.state.
+ATTR_A2A_VERSION = "a2akit.a2a.version"
 ATTR_IS_NEW_TASK = "a2akit.task.is_new"
 ATTR_WORKER_CLASS = "a2akit.worker.class"
 ATTR_METHOD = "a2akit.method"
